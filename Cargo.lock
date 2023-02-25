@@ -88,6 +88,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "allyourlinks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dioxus 0.3.2",
+ "dioxus-html-macro",
+ "dioxus-liveview",
+ "dioxus-ssr",
+ "once_cell",
+ "rand 0.8.5",
+ "rust-embed",
+ "salvo",
+ "serde",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1931,26 +1951,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecd207c9c713c34f95a097a5b029ac2ce6010530c7b49d7fea24d977dede04f5"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "lively"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dioxus 0.3.2",
- "dioxus-html-macro",
- "dioxus-liveview",
- "dioxus-ssr",
- "once_cell",
- "rand 0.8.5",
- "rust-embed",
- "salvo",
- "serde",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
