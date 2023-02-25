@@ -1,8 +1,7 @@
 use dioxus::prelude::*;
 use dioxus_html_macro::html;
 
-#[inline_props]
-pub fn Twitch(cx: Props) -> Element {
+pub fn Twitch(cx: Scope) -> Element {
     cx.render(
         html! {
             <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-twitch" view_box="0 0 16 16">
@@ -13,8 +12,7 @@ pub fn Twitch(cx: Props) -> Element {
     )
 }
 
-#[inline_props]
-pub fn Twitter(cx: Props) -> Element {
+pub fn Twitter(cx: Scope) -> Element {
     cx.render(
         html! {
             <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-twitter" view_box="0 0 16 16">
@@ -24,8 +22,7 @@ pub fn Twitter(cx: Props) -> Element {
     )
 }
 
-#[inline_props]
-pub fn Instagram(cx: Props) -> Element {
+pub fn Instagram(cx: Scope) -> Element {
     cx.render(
         html! {
             <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-instagram" view_box="0 0 16 16">
@@ -35,8 +32,7 @@ pub fn Instagram(cx: Props) -> Element {
     )
 }
 
-#[inline_props]
-pub fn Youtube(cx: Props) -> Element {
+pub fn Youtube(cx: Scope) -> Element {
     cx.render(
         html! {
             <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-youtube" view_box="0 0 16 16">
