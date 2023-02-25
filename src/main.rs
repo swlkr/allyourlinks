@@ -29,14 +29,14 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::Level;
+use tracing::{debug, Level};
 
 mod icons;
 
 const HOME: &str = "/";
-const APP: &str = "/app";
 const LOGIN: &str = "/login";
 const LOGOUT: &str = "/logout";
+const PROFILE: &str = "/@<username>";
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -66,6 +66,21 @@ fn at(path: &str) -> Router {
     Router::with_path(path)
 }
 
+#[handler]
+async fn auth(depot: &mut Depot) -> Result<(), salvo::http::StatusError> {
+    let maybe_id: Option<i64> = depot.session().unwrap().get("user_id");
+    if let Some(id) = maybe_id {
+        let user = sqlx::query_as!(User, "select * from users where id = ?", id)
+            .fetch_one(db())
+            .await
+            .unwrap();
+        depot.inject(user);
+    } else {
+        return Err(salvo::http::StatusError::not_found());
+    }
+    return Ok(());
+}
+
 fn routes() -> Router {
     let session_key = env::var("SESSION_KEY").unwrap();
     let session_handler =
@@ -85,13 +100,17 @@ fn routes() -> Router {
             Router::new()
                 .hoop(session_handler)
                 .hoop(csrf_handler)
+                .hoop(affix::inject(arc_view))
                 .get(home)
                 .post(signup)
                 .push(at(LOGIN).get(get_login).post(post_login))
-                .push(at(LOGOUT).post(logout))
-                .hoop(affix::inject(arc_view))
-                .push(at("/app").get(app_handler))
-                .push(at("/ws").get(connect)),
+                .push(
+                    Router::new()
+                        .hoop(auth)
+                        .push(at(LOGOUT).post(logout))
+                        .push(at(PROFILE).get(profile))
+                        .push(at("/ws").get(connect)),
+                ),
         )
         .push(at("<**path>").get(static_embed::<Assets>()));
 }
@@ -119,22 +138,53 @@ struct AppState {
     user: Option<User>,
 }
 
-#[inline_props]
-fn Layout<'a>(
-    cx: Scope,
+#[derive(Props)]
+struct LayoutProps<'a> {
     csrf_token: &'a str,
     user: Option<User>,
+    live_view: String,
     children: Element<'a>,
-) -> Element<'a> {
+}
+
+impl<'a> LayoutProps<'a> {
+    pub async fn from_depot(depot: &mut Depot) -> LayoutProps {
+        let addr = env::var("SERVER_ADDR").unwrap();
+        let maybe_id: Option<i64> = depot.session().unwrap().get("user_id");
+        let user: Option<User> = match maybe_id {
+            Some(id) => Some(
+                sqlx::query_as!(User, "select * from users where id = ?", id)
+                    .fetch_one(db())
+                    .await
+                    .unwrap(),
+            ),
+            None => None,
+        };
+        let live_view = match maybe_id {
+            Some(_) => dioxus_liveview::interpreter_glue(&format!("ws://{}/ws", addr)),
+            None => String::default(),
+        };
+        let csrf_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
+
+        return LayoutProps {
+            csrf_token,
+            user,
+            live_view,
+            children: Element::default(),
+        };
+    }
+}
+
+fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element {
     use_shared_state_provider(cx, || AppState {
-        csrf_token: csrf_token.to_string(),
-        user: user.clone(),
+        csrf_token: cx.props.csrf_token.to_string(),
+        user: cx.props.user.clone(),
     });
 
-    let username = match user {
+    let username = match &cx.props.user {
         Some(u) => u.username.clone(),
         None => String::default(),
     };
+    let live_view = cx.props.live_view.clone();
 
     cx.render(
         html! {
@@ -149,6 +199,7 @@ fn Layout<'a>(
                 <body class="dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto">
                     <Nav username={username} />
                     {&cx.props.children}
+                    {live_view}
                 </body>
             "</html>"
         }
@@ -221,18 +272,14 @@ fn Home(cx: Scope, error: Option<CreateUserError>) -> Element {
 
 #[handler]
 async fn home(depot: &mut Depot) -> Text<String> {
-    let new_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
-    let user_id: Option<i64> = depot.session().unwrap().get("user_id");
-    let user: User = match user_id {
-        Some(id) => sqlx::query_as!(User, "select * from users where id = ?", id)
-            .fetch_one(db())
-            .await
-            .unwrap(),
-        None => User::default(),
-    };
-
+    let LayoutProps {
+        csrf_token,
+        live_view,
+        user,
+        ..
+    } = LayoutProps::from_depot(depot).await;
     Text::Html(render_lazy(html! {
-        <Layout csrf_token={new_token} user={user}>
+        <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
             <Home />
         </Layout>
     }))
@@ -278,15 +325,121 @@ async fn signup(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Res
     let user: User = new_user.insert().await?;
     let session = depot.session_mut().unwrap();
     _ = session.insert("user_id", user.id)?;
-    res.render(Redirect::other(APP));
+    res.render(Redirect::other(format!("/@{}", user.username)));
     return Ok(());
 }
 
-#[handler]
-fn get_login() {}
+#[inline_props]
+fn Login<'a>(cx: Scope, message: Option<&'a str>) -> Element<'a> {
+    cx.render(html! {
+        <div class="flex flex-col gap-16">
+            <Header />
+            <Form action="/login">
+                <div class="flex flex-col gap-2 md:max-w-lg md:mx-auto">
+                    <div class="flex flex-col">
+                        <div class="dark:text-white text-black">{*message}</div>
+                        <TextField name="login_code" autofocus={true} />
+                    </div>
+                    <Cta>"Login"</Cta>
+                </div>
+            </Form>
+        </div>
+    })
+}
 
 #[handler]
-fn post_login() {}
+async fn get_login(depot: &mut Depot) -> Text<String> {
+    let LayoutProps {
+        csrf_token,
+        live_view,
+        user,
+        ..
+    } = LayoutProps::from_depot(depot).await;
+    Text::Html(render_lazy(html! {
+        <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
+            <Login />
+        </Layout>
+    }))
+}
+
+#[handler]
+async fn profile(depot: &mut Depot) -> Text<String> {
+    let LayoutProps {
+        csrf_token,
+        live_view,
+        user,
+        ..
+    } = LayoutProps::from_depot(depot).await;
+    Text::Html(render_lazy(html! {
+        <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
+            <div id="main"></div>
+        </Layout>
+    }))
+}
+
+#[derive(Deserialize)]
+struct LoginUser {
+    login_code: String,
+}
+
+#[derive(Default, Debug, PartialEq, Clone)]
+struct MaybeUser {
+    id: Option<i64>,
+    username: String,
+    login_code: String,
+    updated_at: Option<i64>,
+    created_at: i64,
+}
+
+impl Into<User> for MaybeUser {
+    fn into(self) -> User {
+        User {
+            id: self.id.unwrap(),
+            username: self.username,
+            login_code: self.login_code,
+            updated_at: self.updated_at,
+            created_at: self.created_at,
+        }
+    }
+}
+
+impl LoginUser {
+    async fn fetch(&self) -> Option<User> {
+        let user = sqlx::query_as!(
+            MaybeUser,
+            "select id, username, login_code, updated_at, created_at from users where login_code = ? limit 1",
+            self.login_code
+        )
+        .fetch_one(db())
+        .await.ok()?;
+        return Some(user.into());
+    }
+}
+
+#[handler]
+async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<()> {
+    let login_user: LoginUser = req.parse_form().await?;
+    let maybe_user: Option<User> = login_user.fetch().await;
+    let session = depot.session_mut().unwrap();
+    if let Some(u) = maybe_user {
+        session.insert("user_id", u.id).unwrap();
+        res.render(Redirect::other(format!("/@{}", u.username)));
+    } else {
+        // TODO exponential backoff
+        let LayoutProps {
+            csrf_token,
+            live_view,
+            user,
+            ..
+        } = LayoutProps::from_depot(depot).await;
+        res.render(Text::Html(render_lazy(html! {
+            <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
+                <Login message="Invalid login code" />
+            </Layout>
+        })));
+    }
+    return Ok(());
+}
 
 #[handler]
 fn logout(depot: &mut Depot, res: &mut Response) {
@@ -413,28 +566,6 @@ async fn main() -> anyhow::Result<()> {
     Server::new(TcpListener::bind(addr)).serve(router).await;
 
     return Ok(());
-}
-
-#[handler]
-async fn app_handler(depot: &mut Depot, res: &mut Response) {
-    let addr = env::var("SERVER_ADDR").unwrap();
-    let glue = dioxus_liveview::interpreter_glue(&format!("ws://{}/ws", addr));
-    let user_id: Option<i64> = depot.session().unwrap().get("user_id");
-    let user: User = match user_id {
-        Some(id) => sqlx::query_as!(User, "select * from users where id = ?", id)
-            .fetch_one(db())
-            .await
-            .unwrap(),
-        None => User::default(),
-    };
-    let new_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
-
-    res.render(Text::Html(render_lazy(html! {
-        <Layout csrf_token={new_token} user={user}>
-            <main id="main"></main>
-            {glue}
-        </Layout>
-    })));
 }
 
 #[handler]
