@@ -93,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dioxus 0.3.2",
+ "dioxus-free-icons",
  "dioxus-html-macro",
  "dioxus-liveview",
  "dioxus-ssr",
@@ -952,6 +953,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dioxus-free-icons"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e88f7a2fc4008a2c9ded210bf08b1ab7501375d77aa8065564eb5dd4c930bb6"
+dependencies = [
+ "dioxus 0.3.2",
 ]
 
 [[package]]

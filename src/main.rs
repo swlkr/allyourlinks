@@ -18,10 +18,10 @@ use salvo::serve_static::static_embed;
 use salvo::session::SessionDepotExt;
 use salvo::session::SessionHandler;
 use serde::Deserialize;
-use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqliteJournalMode;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::sqlite::SqliteSynchronous;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteQueryResult};
 use sqlx::SqlitePool;
 use std::convert::TryInto;
 use std::env;
@@ -29,14 +29,15 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, Level};
+use tracing::Level;
 
 mod icons;
 
 const HOME: &str = "/";
 const LOGIN: &str = "/login";
 const LOGOUT: &str = "/logout";
-const PROFILE: &str = "/@<username>";
+const PROFILE: &str = "/profile";
+const PUBLIC_PROFILE: &str = "/@<username>";
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -62,23 +63,29 @@ pub async fn make_db_pool(database_url: &str) -> SqlitePool {
         .unwrap();
 }
 
-fn at(path: &str) -> Router {
+fn at(path: &str) -> salvo::Router {
     Router::with_path(path)
 }
 
 #[handler]
 async fn auth(depot: &mut Depot) -> Result<(), salvo::http::StatusError> {
+    let maybe_user = depot.obtain::<User>();
+    if let None = maybe_user {
+        return Err(salvo::http::StatusError::not_found());
+    }
+    return Ok(());
+}
+
+#[handler]
+async fn set_user(depot: &mut Depot) {
     let maybe_id: Option<i64> = depot.session().unwrap().get("user_id");
     if let Some(id) = maybe_id {
-        let user = sqlx::query_as!(User, "select * from users where id = ?", id)
+        let user = sqlx::query_as!(User, "select id, username, login_code, updated_at, created_at, bio, photo from users where id = ?", id)
             .fetch_one(db())
             .await
             .unwrap();
         depot.inject(user);
-    } else {
-        return Err(salvo::http::StatusError::not_found());
     }
-    return Ok(());
 }
 
 fn routes() -> Router {
@@ -101,9 +108,11 @@ fn routes() -> Router {
                 .hoop(session_handler)
                 .hoop(csrf_handler)
                 .hoop(affix::inject(arc_view))
+                .hoop(set_user)
                 .get(home)
                 .post(signup)
                 .push(at(LOGIN).get(get_login).post(post_login))
+                .push(at(PUBLIC_PROFILE).get(public_profile))
                 .push(
                     Router::new()
                         .hoop(auth)
@@ -132,16 +141,22 @@ fn Form<'a>(cx: Scope, action: Option<&'a str>, children: Element<'a>) -> Elemen
     })
 }
 
+#[derive(PartialEq, Props)]
+struct AppProps {
+    current_user: User,
+    links: Vec<Link>,
+}
+
 #[derive(Default, PartialEq)]
 struct AppState {
     csrf_token: String,
-    user: Option<User>,
+    current_user: Option<User>,
 }
 
-#[derive(Props)]
+#[derive(Props, Debug)]
 struct LayoutProps<'a> {
     csrf_token: &'a str,
-    user: Option<User>,
+    current_user: Option<User>,
     live_view: String,
     children: Element<'a>,
 }
@@ -149,25 +164,24 @@ struct LayoutProps<'a> {
 impl<'a> LayoutProps<'a> {
     pub async fn from_depot(depot: &mut Depot) -> LayoutProps {
         let addr = env::var("SERVER_ADDR").unwrap();
-        let maybe_id: Option<i64> = depot.session().unwrap().get("user_id");
-        let user: Option<User> = match maybe_id {
-            Some(id) => Some(
-                sqlx::query_as!(User, "select * from users where id = ?", id)
-                    .fetch_one(db())
-                    .await
-                    .unwrap(),
-            ),
-            None => None,
+        let username: String = depot.get("username").cloned().unwrap_or_default();
+        let user = depot.obtain::<User>().cloned();
+        let user_id = match &user {
+            Some(u) => Some(u.id),
+            _ => None,
         };
-        let live_view = match maybe_id {
-            Some(_) => dioxus_liveview::interpreter_glue(&format!("ws://{}/ws", addr)),
+        let live_view = match user_id {
+            Some(_) => dioxus_liveview::interpreter_glue(&format!(
+                "ws://{}/ws?username={}",
+                addr, username
+            )),
             None => String::default(),
         };
         let csrf_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
 
         return LayoutProps {
             csrf_token,
-            user,
+            current_user: user,
             live_view,
             children: Element::default(),
         };
@@ -177,10 +191,10 @@ impl<'a> LayoutProps<'a> {
 fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element {
     use_shared_state_provider(cx, || AppState {
         csrf_token: cx.props.csrf_token.to_string(),
-        user: cx.props.user.clone(),
+        current_user: cx.props.current_user.clone(),
     });
 
-    let username = match &cx.props.user {
+    let username = match &cx.props.current_user {
         Some(u) => u.username.clone(),
         None => String::default(),
     };
@@ -195,6 +209,7 @@ fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element {
                     <meta charset="utf-8" />
                     <meta name="viewport" content="width=device-width" />
                     <link rel="stylesheet" href="/output.css" />
+                    <style>"#main {{ height: calc(100vh - 88px); }}"</style>
                 </head>
                 <body class="dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto">
                     <Nav username={username} />
@@ -275,11 +290,11 @@ async fn home(depot: &mut Depot) -> Text<String> {
     let LayoutProps {
         csrf_token,
         live_view,
-        user,
+        current_user,
         ..
     } = LayoutProps::from_depot(depot).await;
     Text::Html(render_lazy(html! {
-        <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
+        <Layout csrf_token={csrf_token} live_view={live_view} current_user={current_user.unwrap_or_default()}>
             <Home />
         </Layout>
     }))
@@ -292,6 +307,28 @@ struct User {
     login_code: String,
     updated_at: Option<i64>,
     created_at: i64,
+    bio: Option<String>,
+    photo: Option<String>,
+}
+
+impl User {
+    async fn by_id(id: i64) -> Result<User, sqlx::Error> {
+        return sqlx::query_as!(User, "select id as 'id!', username, login_code, updated_at, created_at, bio, photo from users where id = ?", id)
+            .fetch_one(db())
+            .await;
+    }
+
+    async fn by_username(username: String) -> Result<User, sqlx::Error> {
+        return sqlx::query_as!(User, "select id as 'id!', username, login_code, updated_at, created_at, bio, photo from users where username = ?", username)
+            .fetch_one(db())
+            .await;
+    }
+
+    async fn by_login_code(login_code: String) -> Result<User, sqlx::Error> {
+        return sqlx::query_as!(User, "select id as 'id!', username, login_code, updated_at, created_at, bio, photo from users where login_code = ?", login_code)
+            .fetch_one(db())
+            .await;
+    }
 }
 
 #[derive(Deserialize)]
@@ -313,9 +350,7 @@ impl NewUser {
         .execute(db())
         .await?
         .last_insert_rowid();
-        return sqlx::query_as!(User, "select * from users where id = ?", id)
-            .fetch_one(db())
-            .await;
+        return User::by_id(id).await;
     }
 }
 
@@ -352,29 +387,213 @@ async fn get_login(depot: &mut Depot) -> Text<String> {
     let LayoutProps {
         csrf_token,
         live_view,
-        user,
+        current_user,
         ..
     } = LayoutProps::from_depot(depot).await;
     Text::Html(render_lazy(html! {
-        <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
+        <Layout csrf_token={csrf_token} live_view={live_view} current_user={current_user.unwrap_or_default()}>
             <Login />
         </Layout>
     }))
 }
 
-#[handler]
-async fn profile(depot: &mut Depot) -> Text<String> {
-    let LayoutProps {
-        csrf_token,
-        live_view,
-        user,
+#[derive(Deserialize, PartialEq, Clone, Debug, Default)]
+struct Link {
+    id: i64,
+    user_id: i64,
+    url: String,
+    name: Option<String>,
+    updated_at: Option<i64>,
+    created_at: i64,
+}
+
+impl Link {
+    async fn all_by_user_id(user_id: i64) -> Vec<Link> {
+        return sqlx::query_as!(
+            Link,
+            "select id as 'id!', user_id, url, name, updated_at, created_at from links where user_id = ? order by created_at desc",
+            user_id
+        )
+        .fetch_all(db())
+        .await
+        .unwrap();
+    }
+
+    async fn last() -> Option<Link> {
+        sqlx::query_as!(Link, "select id as 'id!', user_id as 'user_id!', url as 'url!', name, updated_at, created_at as 'created_at!' from links order by created_at asc limit 1")
+            .fetch_one(db())
+            .await
+            .ok()
+    }
+
+    async fn delete(&self) -> Result<SqliteQueryResult, sqlx::Error> {
+        sqlx::query!("delete from links where id = ?", self.id)
+            .execute(db())
+            .await
+    }
+
+    async fn insert<'a>(user_id: i64, url: &'a str) -> Result<SqliteQueryResult, sqlx::Error> {
+        sqlx::query!(
+            "insert into links (user_id, url) values (?, ?)",
+            user_id,
+            url
+        )
+        .execute(db())
+        .await
+    }
+}
+
+#[inline_props]
+fn LinkComponent(cx: Scope, link: Link) -> Element {
+    let link_name = match &link.name {
+        Some(n) => n,
+        None => &link.url
+    };
+    let is_editing = use_state(cx, || false);
+    let edit_clicked = move || {
+        is_editing.set(true);
+    };
+    cx.render(
+        if *is_editing.get() {
+            rsx! {
+                div {
+                    class: "w-full flex gap-4",
+                    TextField {
+                        lbl: "name",
+                        name: "name",
+                        autofocus: true,
+                        value: "{link_name}",
+                    }
+                    TextField {
+                        lbl: "url",
+                        name: "url",
+                        autofocus: false,
+                        value: "{link.url}"
+                    }
+                }
+            }
+        } else {
+            rsx! {
+                a {
+                    href: "{link.url}",
+                    onclick: move |event| {
+                        event.stop_propagation();
+                        edit_clicked()  
+                    },
+                    "{link_name}"
+                }
+            } 
+        }
+    )
+}
+
+#[inline_props]
+fn LinkList(cx: Scope, links: Option<Vec<Link>>) -> Element {
+    if links.is_none() {
+        return None;
+    }
+    cx.render(rsx!(
+        div {
+            class: "flex flex-col mx-auto gap-8 items-center h-full w-full",
+            links.clone().unwrap().into_iter().map(|link| {
+                rsx! {
+                   LinkComponent {
+                        key: "{link.id}",
+                        link: link,
+                   }
+                }
+            })
+        }
+    ))
+}
+
+#[inline_props]
+fn Profile(cx: Scope, links: Vec<Link>) -> Element {
+    let app_state = use_shared_state::<AppState>(cx).unwrap();
+    let current_user = app_state.read().current_user.clone().unwrap();
+    let links_state = use_state(cx, || links.clone());
+    let loading = use_state(cx, || false);
+    let User {
+        photo,
+        username,
+        bio,
+        id,
         ..
-    } = LayoutProps::from_depot(depot).await;
-    Text::Html(render_lazy(html! {
-        <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
-            <div id="main"></div>
-        </Layout>
-    }))
+    } = current_user;
+    let add_link = move || {
+        let user_id = current_user.id;
+        to_owned![links_state, loading];
+        cx.spawn(async move {
+            let _ = Link::insert(current_user.id, "https://example.com")
+                .await
+                .unwrap();
+            let new_links = Link::all_by_user_id(user_id).await;
+            loading.set(false);
+            links_state.set(new_links.clone());
+        });
+    };
+    let delete_last_link = move || {
+        to_owned![links_state, loading];
+        let user_id = current_user.id;
+        cx.spawn(async move {
+            if let Some(link) = Link::last().await {
+                let _ = link.delete().await;
+                let new_links = Link::all_by_user_id(user_id).await;
+                loading.set(false);
+                links_state.set(new_links.clone());
+            }
+        });
+    };
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col max-w-3xl mx-auto gap-8 text-center items-center h-full relative w-full",
+            {
+                match photo {
+                    Some(p) => rsx! {
+                        img { src: "{p}" }
+                    },
+                    _ => rsx! { Icon {
+                        width: 64,
+                        height: 64,
+                        icon: BsPersonCircle
+                    }}
+                }
+            }
+            div {
+                class: "font-bold text-xl",
+                "@{username}"
+            }
+            div {
+                match bio {
+                    Some(b) => b,
+                    _ => String::default()
+                }
+            }
+            LinkList {
+                links: links_state.get().clone()
+            }
+            div {
+                class: "absolute bottom-2 right-2",
+                div {
+                    class: "flex flex-col gap-8",
+                    DeleteLinkButton {
+                        onclick: move |_| {
+                            loading.set(true);
+                            delete_last_link();
+                        },
+                        disabled: *loading.get()
+                    }
+                    AddLinkButton {
+                        onclick: move |_| {
+                            loading.set(true);
+                            add_link();
+                        },
+                        disabled: *loading.get()
+                    }
+                }
+            }
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -382,44 +601,10 @@ struct LoginUser {
     login_code: String,
 }
 
-#[derive(Default, Debug, PartialEq, Clone)]
-struct MaybeUser {
-    id: Option<i64>,
-    username: String,
-    login_code: String,
-    updated_at: Option<i64>,
-    created_at: i64,
-}
-
-impl Into<User> for MaybeUser {
-    fn into(self) -> User {
-        User {
-            id: self.id.unwrap(),
-            username: self.username,
-            login_code: self.login_code,
-            updated_at: self.updated_at,
-            created_at: self.created_at,
-        }
-    }
-}
-
-impl LoginUser {
-    async fn fetch(&self) -> Option<User> {
-        let user = sqlx::query_as!(
-            MaybeUser,
-            "select id, username, login_code, updated_at, created_at from users where login_code = ? limit 1",
-            self.login_code
-        )
-        .fetch_one(db())
-        .await.ok()?;
-        return Some(user.into());
-    }
-}
-
 #[handler]
 async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<()> {
     let login_user: LoginUser = req.parse_form().await?;
-    let maybe_user: Option<User> = login_user.fetch().await;
+    let maybe_user: Option<User> = User::by_login_code(login_user.login_code).await.ok();
     let session = depot.session_mut().unwrap();
     if let Some(u) = maybe_user {
         session.insert("user_id", u.id).unwrap();
@@ -429,11 +614,11 @@ async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) ->
         let LayoutProps {
             csrf_token,
             live_view,
-            user,
+            current_user,
             ..
         } = LayoutProps::from_depot(depot).await;
         res.render(Text::Html(render_lazy(html! {
-            <Layout csrf_token={csrf_token} live_view={live_view} user={user.unwrap_or_default()}>
+            <Layout csrf_token={csrf_token} live_view={live_view} current_user={current_user.unwrap_or_default()}>
                 <Login message="Invalid login code" />
             </Layout>
         })));
@@ -446,24 +631,6 @@ fn logout(depot: &mut Depot, res: &mut Response) {
     let session = depot.session_mut().unwrap();
     session.remove("user_id");
     res.render(Redirect::other(HOME));
-}
-
-#[derive(PartialEq, Props)]
-struct AppProps {
-    user: User,
-}
-
-fn app(cx: Scope<AppProps>) -> Element {
-    let mut num = use_state(cx, || 0);
-    let times = if *num.get() == 1 { "time" } else { "times" };
-
-    cx.render(html! {
-        <div class="flex gap-2">
-            "you are logged in as: @{&cx.props.user.username}"
-            "you clicked this {num} {times}"
-            <Button onclick={move |_| num += 1}>"click me"</Button>
-        </div>
-    })
 }
 
 #[inline_props]
@@ -485,11 +652,6 @@ fn Submit<'a>(cx: Scope, value: &'a str) -> Element<'a> {
 #[inline_props]
 fn Nav(cx: Scope, username: Option<String>) -> Element {
     let name = username.clone().unwrap_or_default();
-    let href_profile = match username {
-        Some(u) => format!("/@{}", u),
-        None => String::default(),
-    };
-
     cx.render(html! {
         <nav class="flex gap-8 justify-center py-8">
             <a href={HOME}>"Home"</a>
@@ -498,7 +660,7 @@ fn Nav(cx: Scope, username: Option<String>) -> Element {
                     cx.render(
                         html! {
                             <div class="flex gap-8">
-                                <a href="{href_profile}">"Profile"</a>
+                                <a href={PROFILE}>"Profile"</a>
                                 <Form action={LOGOUT}>
                                     <Submit value="Logout" />
                                 </Form>
@@ -523,10 +685,88 @@ fn Button<'a>(
     onclick: EventHandler<'a, MouseEvent>,
     children: Element<'a>,
 ) -> Element<'a> {
-    cx.render(html! {
-        <button onclick={move |event| onclick.call(event) }>
-            {&cx.props.children}
-        </button>
+    cx.render(rsx! {
+        button {
+            onclick: move |event| onclick.call(event),
+            &cx.props.children
+        }
+    })
+}
+
+#[inline_props]
+fn CircleButton<'a>(
+    cx: Scope,
+    onclick: EventHandler<'a, MouseEvent>,
+    disabled: Option<bool>,
+    children: Element<'a>,
+) -> Element<'a> {
+    let is_disabled = match disabled {
+        Some(true) => true,
+        Some(false) => false,
+        _ => false
+    };
+    let disabled_str = match is_disabled {
+        true => "",
+        false => "false",
+    };
+    let on_click = move |event| {
+        if !is_disabled {                    
+            onclick.call(event)
+        }
+    };
+    cx.render(rsx! {
+        button {
+            class: "rounded-full dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 p-4 w-16 h-16 disabled:opacity-50",
+            disabled: "{disabled_str}",
+            onclick: on_click,
+            &cx.props.children
+        }
+    })
+}
+
+#[inline_props]
+fn AddLinkButton<'a>(
+    cx: Scope,
+    onclick: EventHandler<'a, MouseEvent>,
+    disabled: Option<bool>,
+    children: Element<'a>,
+) -> Element<'a> {
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col gap-2 items-center",
+            CircleButton {
+                onclick: move |event| { onclick.call(event) },
+                disabled: disabled.unwrap_or(false),
+                div {
+                    class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+                    Icon { width: 40, height: 40, icon: BsPlus }
+                }
+            }
+            div { "Add" }
+        }
+    })
+}
+
+#[inline_props]
+fn DeleteLinkButton<'a>(
+    cx: Scope,
+    onclick: EventHandler<'a, MouseEvent>,
+    disabled: Option<bool>,
+    children: Element<'a>,
+) -> Element<'a> {
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col gap-2 items-center",
+            CircleButton {
+                onclick: move |event| { onclick.call(event) },
+                disabled: disabled.unwrap_or(false),
+                div {
+                    class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+                    Icon { width: 40, height: 40, icon: BsX }
+                }
+            }
+            div { "Delete" }
+        }
     })
 }
 
@@ -534,7 +774,9 @@ fn Button<'a>(
 fn TextField<'a>(
     cx: Scope,
     name: &'a str,
+    lbl: Option<&'a str>,
     autofocus: Option<bool>,
+    value: Option<&'a str>,
     placeholder: Option<&'a str>,
 ) -> Element<'a> {
     let autofocus_attr = if let Some(_) = *autofocus {
@@ -543,9 +785,155 @@ fn TextField<'a>(
         ""
     };
     let place_holder = if let Some(p) = *placeholder { p } else { "" };
-    return cx.render(html! {
-        <input  r#type="text"  name="{name}"  autofocus="{autofocus_attr}"  placeholder="{place_holder}" class="bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full" />
+    let val = if let Some(val) = value { val } else { "" };
+    let label_ = if let Some(label_) = lbl { label_ } else { "" };
+    return cx.render(rsx! (
+        label {
+            class: "flex flex-col gap-2",
+            "{label_}"
+            input { 
+                r#type: "text",
+                name: "{name}",
+                autofocus: "{autofocus_attr}",
+                placeholder: "{place_holder}",
+                class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
+                value: "{val}",
+            }
+        }
+    ));
+}
+
+fn app(cx: Scope<AppProps>) -> Element {
+    let AppProps {
+        current_user,
+        links,
+    } = cx.props;
+    use_shared_state_provider(cx, || AppState {
+        csrf_token: String::default(),
+        current_user: Some(current_user.clone()),
     });
+    return cx.render(rsx! {
+        Profile {
+            links: links.clone()
+        }
+    });
+}
+
+#[derive(Deserialize)]
+struct ProfileParams {
+    username: String,
+}
+
+#[handler]
+async fn public_profile(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), StatusError> {
+    let params: ProfileParams = req.parse_params().unwrap();
+    let user_result = User::by_username(params.username).await;
+    let user = match user_result {
+        Ok(u) => u,
+        Err(_) => return Err(StatusError::not_found()),
+    };
+    let User {
+        photo,
+        username,
+        bio,
+        id,
+        ..
+    } = user;
+    let links = Link::all_by_user_id(id).await;
+    let props =  LayoutProps::from_depot(depot).await;
+    res.render(Text::Html(render_lazy(rsx! (
+        Layout {
+            csrf_token: props.csrf_token,
+            current_user: props.current_user.unwrap_or_default(),
+            live_view: String::default(),
+            div {
+                class: "flex flex-col max-w-3xl mx-auto gap-8 text-center items-center h-full relative w-full",
+                {
+                    match photo {
+                        Some(p) => rsx! {
+                            img { src: "{p}" }
+                        },
+                        _ => rsx! { Icon {
+                            width: 64,
+                            height: 64,
+                            icon: BsPersonCircle
+                        }}
+                    }
+                }
+                div {
+                    class: "font-bold text-xl",
+                    "@{username}"
+                }
+                div {
+                    "{bio:?}"
+                }
+                LinkList {
+                    links: links
+                }
+        }
+    }))));
+    return Ok(());
+}
+
+#[handler]
+async fn profile(
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), StatusError> {
+    let props = LayoutProps::from_depot(depot).await;
+    res.render(Text::Html(render_lazy(rsx! {
+        Layout {
+            csrf_token: props.csrf_token,
+            current_user: props.current_user.unwrap_or_default(),
+            live_view: props.live_view,
+            div {
+                id: "main"
+            }
+        }
+    })));
+    return Ok(());
+}
+
+#[handler]
+async fn connect(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), StatusError> {
+    let addr = format!("http://{}", env::var("SERVER_ADDR").unwrap());
+    let origin = match req.header::<String>(ORIGIN) {
+        Some(o) => o,
+        None => String::default(),
+    };
+    if addr != origin {
+        return Err(salvo::http::StatusError::not_found());
+    }
+    let maybe_user = depot.obtain::<User>().cloned();
+    let view = depot.obtain::<Arc<LiveViewPool>>().unwrap().clone();
+
+    if let Some(current_user) = maybe_user {
+        let links = Link::all_by_user_id(current_user.id).await;
+        WebSocketUpgrade::new()
+            .upgrade(req, res, |ws| async move {
+                _ = view
+                    .launch_with_props::<AppProps>(
+                        dioxus_liveview::salvo_socket(ws),
+                        app,
+                        AppProps {
+                            current_user,
+                            links,
+                        },
+                    )
+                    .await
+            })
+            .await
+    } else {
+        return Err(salvo::http::StatusError::not_found());
+    }
 }
 
 #[tokio::main]
@@ -566,43 +954,4 @@ async fn main() -> anyhow::Result<()> {
     Server::new(TcpListener::bind(addr)).serve(router).await;
 
     return Ok(());
-}
-
-#[handler]
-async fn connect(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), StatusError> {
-    let addr = format!("http://{}", env::var("SERVER_ADDR").unwrap());
-    let origin = match req.header::<String>(ORIGIN) {
-        Some(o) => o,
-        None => String::default(),
-    };
-    if addr != origin {
-        return Err(salvo::http::StatusError::not_found());
-    }
-    let maybe_user_id: Option<i64> = depot.session().unwrap().get("user_id");
-    if let Some(user_id) = maybe_user_id {
-        let user = sqlx::query_as!(User, "select * from users where id = ?", user_id)
-            .fetch_one(db())
-            .await
-            .unwrap();
-        let view = depot.obtain::<Arc<LiveViewPool>>().unwrap().clone();
-
-        // TODO: check the origin as well
-        WebSocketUpgrade::new()
-            .upgrade(req, res, |ws| async move {
-                _ = view
-                    .launch_with_props::<AppProps>(
-                        dioxus_liveview::salvo_socket(ws),
-                        app,
-                        AppProps { user },
-                    )
-                    .await
-            })
-            .await
-    } else {
-        return Err(salvo::http::StatusError::not_found());
-    }
 }
