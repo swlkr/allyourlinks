@@ -2,7 +2,10 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+mod database;
+
 use anyhow::Result;
+use database::db;
 use dioxus::html::input_data::keyboard_types::Code;
 use dioxus::prelude::*;
 use dioxus_free_icons::icons::bs_icons::*;
@@ -10,7 +13,7 @@ use dioxus_free_icons::Icon;
 use dioxus_html_macro::html;
 use dioxus_liveview::LiveViewPool;
 use dioxus_ssr::render_lazy;
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::Lazy;
 use rand::Rng;
 use rust_embed::RustEmbed;
 use salvo::affix;
@@ -22,24 +25,18 @@ use salvo::serve_static::static_embed;
 use salvo::session::SessionDepotExt;
 use salvo::session::SessionHandler;
 use serde::Deserialize;
-use sqlx::sqlite::SqliteJournalMode;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::sqlite::SqliteSynchronous;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteQueryResult};
-use sqlx::SqlitePool;
+use sqlx::sqlite::SqliteQueryResult;
 use std::convert::TryInto;
 use std::env;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, Level};
 
-const HOME: &str = "/";
-const LOGIN: &str = "/login";
-const LOGOUT: &str = "/logout";
-const PROFILE: &str = "/profile";
-const PUBLIC_PROFILE: &str = "/@<username>";
+pub const HOME: &str = "/";
+pub const LOGIN: &str = "/login";
+pub const LOGOUT: &str = "/logout";
+pub const PROFILE: &str = "/profile";
+pub const PUBLIC_PROFILE: &str = "/@<username>";
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -59,26 +56,7 @@ enum Icon {
     Globe,
 }
 
-pub static DB_POOL: OnceCell<SqlitePool> = OnceCell::new();
 static DEFAULT_LINKS: Lazy<Vec<Link>> = Lazy::new(|| Link::default_links());
-
-pub fn db() -> &'static SqlitePool {
-    DB_POOL.get().unwrap()
-}
-
-pub async fn make_db_pool(database_url: &str) -> SqlitePool {
-    let connection_options = SqliteConnectOptions::from_str(database_url)
-        .unwrap()
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(30));
-    return SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(connection_options)
-        .await
-        .unwrap();
-}
 
 fn at(path: &str) -> salvo::Router {
     Router::with_path(path)
@@ -1502,15 +1480,14 @@ async fn connect(
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
 
     let database_url = env::var("DATABASE_URL")?;
-    let pool = make_db_pool(&database_url).await;
-    DB_POOL.set(pool).unwrap();
-    sqlx::migrate!().run(db()).await?;
+    database::init(database_url).await;
+    database::migrate().await?;
     let addr: SocketAddr = ([127, 0, 0, 1], 9001).into();
     let router = routes();
 
