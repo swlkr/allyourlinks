@@ -13,7 +13,6 @@ use dioxus_free_icons::Icon;
 use dioxus_html_macro::html;
 use dioxus_liveview::LiveViewPool;
 use dioxus_ssr::render_lazy;
-use once_cell::sync::Lazy;
 use rand::Rng;
 use rust_embed::RustEmbed;
 use salvo::affix;
@@ -55,8 +54,6 @@ enum Icon {
     #[default]
     Globe,
 }
-
-static DEFAULT_LINKS: Lazy<Vec<Link>> = Lazy::new(|| Link::default_links());
 
 fn at(path: &str) -> salvo::Router {
     Router::with_path(path)
@@ -525,6 +522,18 @@ impl Link {
             Icon::Twitter
         } else if self.url.contains("twitch.tv") {
             Icon::Twitch
+        } else if self.url.contains("github.com") {
+            Icon::Github
+        } else if self.url.contains("instagram.com") {
+            Icon::Instagram
+        } else if self.url.contains("youtube.com") {
+            Icon::Youtube
+        } else if self.url.contains("tiktok.com") {
+            Icon::Tiktok
+        } else if self.url.contains("discord.com") {
+            Icon::Discord
+        } else if self.url.contains("stackoverflow.com") {
+            Icon::Stackoverflow
         } else {
             Icon::Globe
         }
@@ -560,32 +569,54 @@ impl Link {
 }
 
 #[inline_props]
-fn LinkIconComponent<'a>(cx: Scope, name_and_url: &'a String) -> Element<'a> {
-    cx.render(rsx!(if name_and_url.contains("twitter.com") {
-        rsx! {
-            Icon {
-                width: 32,
-                height: 32,
-                icon: BsTwitter
-            }
-        }
-    } else if name_and_url.contains("twitch.tv") {
-        rsx! {
-            Icon {
-                width: 32,
-                height: 32,
-                icon: BsTwitch
-            }
-        }
-    } else {
-        rsx! {
-            Icon {
-                width: 32,
-                height: 32,
-                icon: BsGlobe,
-            }
-        }
-    }))
+fn LinkIconComponent<'a>(cx: Scope, link: &'a Link) -> Element<'a> {
+    cx.render(match link.icon() {
+        Icon::Twitch => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsTwitch
+        },),
+        Icon::Twitter => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsTwitter
+        },),
+        Icon::Instagram => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsInstagram
+        },),
+        Icon::Youtube => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsYoutube
+        },),
+        Icon::Tiktok => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsTiktok
+        },),
+        Icon::Discord => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsDiscord
+        },),
+        Icon::Github => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsGithub
+        },),
+        Icon::Stackoverflow => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsStackOverflow
+        },),
+        Icon::Globe => rsx!(Icon {
+            width: 32,
+            height: 32,
+            icon: BsGlobe
+        },),
+    })
 }
 
 #[inline_props]
@@ -632,7 +663,7 @@ fn LinkComponent<'a>(
             div {
                 class: "flex gap-4",
                 LinkIconComponent {
-                    name_and_url: name_and_url.get()
+                    link: link
                 },
                 TextField {
                     name: "name_and_url",
@@ -664,7 +695,7 @@ fn LinkComponent<'a>(
             div {
                 class: "flex gap-4 items-center",
                 LinkIconComponent {
-                    name_and_url: name_and_url.get()
+                    link: link
                 }
                 a {
                     class: "px-2 py-3 dark:bg-yellow-400 dark:text-zinc-900 rounded-md",
