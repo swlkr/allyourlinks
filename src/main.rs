@@ -1,12 +1,16 @@
 #![allow(non_snake_case)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
 
-use crate::icons::*;
 use anyhow::Result;
+use dioxus::html::input_data::keyboard_types::Code;
 use dioxus::prelude::*;
+use dioxus_free_icons::icons::bs_icons::*;
+use dioxus_free_icons::Icon;
 use dioxus_html_macro::html;
 use dioxus_liveview::LiveViewPool;
 use dioxus_ssr::render_lazy;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use rand::Rng;
 use rust_embed::RustEmbed;
 use salvo::affix;
@@ -29,9 +33,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::Level;
-
-mod icons;
+use tracing::{debug, Level};
 
 const HOME: &str = "/";
 const LOGIN: &str = "/login";
@@ -43,7 +45,22 @@ const PUBLIC_PROFILE: &str = "/@<username>";
 #[folder = "static"]
 struct Assets;
 
+#[derive(Debug, Default)]
+enum Icon {
+    Twitch,
+    Twitter,
+    Instagram,
+    Youtube,
+    Tiktok,
+    Discord,
+    Github,
+    Stackoverflow,
+    #[default]
+    Globe,
+}
+
 pub static DB_POOL: OnceCell<SqlitePool> = OnceCell::new();
+static DEFAULT_LINKS: Lazy<Vec<Link>> = Lazy::new(|| Link::default_links());
 
 pub fn db() -> &'static SqlitePool {
     DB_POOL.get().unwrap()
@@ -98,7 +115,7 @@ fn routes() -> Router {
             .unwrap();
     let form_finder = FormFinder::new("csrf_token");
     let csrf_key: [u8; 32] = env::var("CSRF_KEY").unwrap().as_bytes().try_into().unwrap();
-    let csrf_handler = aes_gcm_session_csrf(csrf_key, form_finder.clone());
+    let csrf_handler = aes_gcm_session_csrf(csrf_key, form_finder);
     let view = LiveViewPool::new();
     let arc_view = Arc::new(view);
 
@@ -107,16 +124,19 @@ fn routes() -> Router {
             Router::new()
                 .hoop(session_handler)
                 .hoop(csrf_handler)
-                .hoop(affix::inject(arc_view))
                 .hoop(set_user)
-                .get(home)
-                .post(signup)
-                .push(at(LOGIN).get(get_login).post(post_login))
-                .push(at(PUBLIC_PROFILE).get(public_profile))
+                .push(
+                    Router::new()
+                        .get(home)
+                        .post(signup)
+                        .push(at(LOGIN).get(get_login).post(post_login))
+                        .push(at(PUBLIC_PROFILE).get(public_profile))
+                        .push(at(LOGOUT).post(logout)),
+                )
                 .push(
                     Router::new()
                         .hoop(auth)
-                        .push(at(LOGOUT).post(logout))
+                        .hoop(affix::inject(arc_view))
                         .push(at(PROFILE).get(profile))
                         .push(at("/ws").get(connect)),
                 ),
@@ -125,26 +145,31 @@ fn routes() -> Router {
 }
 
 #[inline_props]
-fn Form<'a>(cx: Scope, action: Option<&'a str>, children: Element<'a>) -> Element<'a> {
-    let csrf_token = use_shared_state::<AppState>(cx)
-        .unwrap()
-        .read()
-        .csrf_token
-        .clone();
+fn Form<'a>(cx: Scope, action: &'a str, children: Element<'a>) -> Element<'a> {
+    let app_state = use_shared_state::<AppState>(cx);
+    let csrf_token = match app_state {
+        Some(st) => st.read().csrf_token.clone(),
+        _ => String::with_capacity(0),
+    };
     let method = Method::POST;
-    let act = action.unwrap_or("");
-    cx.render(html! {
-        <form action="{act}" method="{method}">
-            <input r#type="hidden" value="{csrf_token}" name="csrf_token" />
-            {&cx.props.children}
-        </form>
-    })
+    cx.render(rsx! (
+        form {
+            method: "{method}",
+            action: "{action}",
+            input {
+                r#type: "hidden",
+                name: "csrf_token",
+                value: "{csrf_token}"
+            }
+            &cx.props.children
+        }
+    ))
 }
 
 #[derive(PartialEq, Props)]
 struct AppProps {
+    csrf_token: String,
     current_user: User,
-    links: Vec<Link>,
 }
 
 #[derive(Default, PartialEq)]
@@ -156,66 +181,67 @@ struct AppState {
 #[derive(Props, Debug)]
 struct LayoutProps<'a> {
     csrf_token: &'a str,
-    current_user: Option<User>,
-    live_view: String,
+    #[props(!optional)]
+    current_user: Option<&'a User>,
+    #[props(optional)]
+    liveview_js: Option<String>,
     children: Element<'a>,
 }
 
 impl<'a> LayoutProps<'a> {
     pub async fn from_depot(depot: &mut Depot) -> LayoutProps {
         let addr = env::var("SERVER_ADDR").unwrap();
-        let username: String = depot.get("username").cloned().unwrap_or_default();
-        let user = depot.obtain::<User>().cloned();
-        let user_id = match &user {
+        let current_user = depot.obtain::<User>();
+        let user_id = match &current_user {
             Some(u) => Some(u.id),
             _ => None,
         };
-        let live_view = match user_id {
-            Some(_) => dioxus_liveview::interpreter_glue(&format!(
+        let liveview_js = match &current_user {
+            Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
                 "ws://{}/ws?username={}",
                 addr, username
-            )),
-            None => String::default(),
+            ))),
+            _ => None,
         };
         let csrf_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
 
         return LayoutProps {
             csrf_token,
-            current_user: user,
-            live_view,
+            current_user,
+            liveview_js,
             children: Element::default(),
         };
     }
 }
 
-fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element {
+fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element<'a> {
     use_shared_state_provider(cx, || AppState {
-        csrf_token: cx.props.csrf_token.to_string(),
-        current_user: cx.props.current_user.clone(),
+        csrf_token: cx.props.csrf_token.to_owned(),
+        current_user: cx.props.current_user.cloned(),
     });
-
-    let username = match &cx.props.current_user {
-        Some(u) => u.username.clone(),
-        None => String::default(),
+    let liveview_js = match &cx.props.liveview_js {
+        Some(js) => js.clone(),
+        None => String::with_capacity(0),
     };
-    let live_view = cx.props.live_view.clone();
-
     cx.render(
-        html! {
+        rsx! {
             "<!DOCTYPE html>"
             "<html lang=en>"
-                <head>
-                    <title>"all your links"</title>
-                    <meta charset="utf-8" />
-                    <meta name="viewport" content="width=device-width" />
-                    <link rel="stylesheet" href="/output.css" />
-                    <style>"#main {{ height: calc(100vh - 88px); }}"</style>
-                </head>
-                <body class="dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto">
-                    <Nav username={username} />
-                    {&cx.props.children}
-                    {live_view}
-                </body>
+                head {
+                    title {
+                      "all your links"  
+                    }
+                    meta { charset: "utf-8" }
+                    meta { name: "viewport", content:"width=device-width" }
+                    link { rel: "stylesheet", href: "/output.css" }
+                    style { "#main {{ height: calc(100vh - 88px); }}" }
+                }
+                body {
+                    class: "dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto",
+                    Nav { user: cx.props.current_user }
+                    &cx.props.children
+                    "{liveview_js}"
+                }
             "</html>"
         }
     )
@@ -231,72 +257,72 @@ impl std::fmt::Display for CreateUserError {
 }
 
 fn Header(cx: Scope) -> Element {
-    cx.render(
-        html! {
-            <header class="flex flex-col gap-1 text-center">
-                <h1 class="font-bold text-5xl lg:text-7xl">
-                    <a href={HOME}>"all your links"</a>
-                </h1>
-                <p class="max-w-md mx-auto">"Share everything you create, sell or curate behind one link"</p>
-            </header>
+    cx.render(rsx! {
+        header {
+            class: "flex flex-col gap-1 text-center",
+            h1 {
+                class: "font-bold text-5xl lg:text-7xl",
+                a {
+                    href: HOME,
+                    "all your links"
+                }
+            }
+            p {
+                class: "max-w-md mx-auto",
+                "Share everything you create, sell or curate behind one link"
+            }
         }
-    )
+    })
 }
+
 #[inline_props]
 fn Home(cx: Scope, error: Option<CreateUserError>) -> Element {
     let err = match error {
         Some(err) => err.to_string(),
         None => String::default(),
     };
-    cx.render(
-        html! {
-            <div class="flex flex-col gap-16">
-                <Header />
-                <Form action="/">
-                    <div class="flex flex-col gap-2 md:max-w-lg md:mx-auto">
-                        <div class="flex flex-col">
-                            <div class="dark:text-white text-black">{err}</div>
-                            <TextField name="username" autofocus={true} />
-                        </div>
-                        <Cta>"Claim your username"</Cta>
-                    </div>
-                </Form>
-                <div class="grid grid-cols-4 gap-8 md:mx-auto">
-                    <Twitch />
-                    <Twitter />
-                    <Instagram />
-                    <Youtube />
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-tiktok" view_box="0 0 16 16">
-                      <path d="M9 0h1.98c.144.715.54 1.617 1.235 2.512C12.895 3.389 13.797 4 15 4v2c-1.753 0-3.07-.814-4-1.829V11a5 5 0 1 1-5-5v2a3 3 0 1 0 3 3V0Z"/>
-                    </svg>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-discord" view_box="0 0 16 16">
-                      <path d="M13.545 2.907a13.227 13.227 0 0 0-3.257-1.011.05.05 0 0 0-.052.025c-.141.25-.297.577-.406.833a12.19 12.19 0 0 0-3.658 0 8.258 8.258 0 0 0-.412-.833.051.051 0 0 0-.052-.025c-1.125.194-2.22.534-3.257 1.011a.041.041 0 0 0-.021.018C.356 6.024-.213 9.047.066 12.032c.001.014.01.028.021.037a13.276 13.276 0 0 0 3.995 2.02.05.05 0 0 0 .056-.019c.308-.42.582-.863.818-1.329a.05.05 0 0 0-.01-.059.051.051 0 0 0-.018-.011 8.875 8.875 0 0 1-1.248-.595.05.05 0 0 1-.02-.066.051.051 0 0 1 .015-.019c.084-.063.168-.129.248-.195a.05.05 0 0 1 .051-.007c2.619 1.196 5.454 1.196 8.041 0a.052.052 0 0 1 .053.007c.08.066.164.132.248.195a.051.051 0 0 1-.004.085 8.254 8.254 0 0 1-1.249.594.05.05 0 0 0-.03.03.052.052 0 0 0 .003.041c.24.465.515.909.817 1.329a.05.05 0 0 0 .056.019 13.235 13.235 0 0 0 4.001-2.02.049.049 0 0 0 .021-.037c.334-3.451-.559-6.449-2.366-9.106a.034.034 0 0 0-.02-.019Zm-8.198 7.307c-.789 0-1.438-.724-1.438-1.612 0-.889.637-1.613 1.438-1.613.807 0 1.45.73 1.438 1.613 0 .888-.637 1.612-1.438 1.612Zm5.316 0c-.788 0-1.438-.724-1.438-1.612 0-.889.637-1.613 1.438-1.613.807 0 1.451.73 1.438 1.613 0 .888-.631 1.612-1.438 1.612Z"/>
-                    </svg>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-github" view_box="0 0 16 16">
-                      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
-                    </svg>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="bi bi-stack-overflow" view_box="0 0 16 16">
-                      <path d="M12.412 14.572V10.29h1.428V16H1v-5.71h1.428v4.282h9.984z"/>
-                      <path d="M3.857 13.145h7.137v-1.428H3.857v1.428zM10.254 0 9.108.852l4.26 5.727 1.146-.852L10.254 0zm-3.54 3.377 5.484 4.567.913-1.097L7.627 2.28l-.914 1.097zM4.922 6.55l6.47 3.013.603-1.294-6.47-3.013-.603 1.294zm-.925 3.344 6.985 1.469.294-1.398-6.985-1.468-.294 1.397z"/>
-                    </svg>
-                </div>
-            </div>
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col gap-16 px-4 lg:px-0",
+            Header {}
+            Form {
+                action: "/"
+                div {
+                    class: "flex flex-col gap-2 md:max-w-lg md:mx-auto",
+                    div {
+                        class: "flex flex-col",
+                        div {
+                            class: "dark:text-white text-black",
+                            err
+                        }
+                        TextField {
+                            name :"username"
+                            autofocus: true
+                        }
+                    }
+                    Cta {
+                        "Claim your username"
+                    }
+                }
+            }
+            IconList {}
         }
-    )
+    })
 }
 
 #[handler]
 async fn home(depot: &mut Depot) -> Text<String> {
     let LayoutProps {
         csrf_token,
-        live_view,
         current_user,
         ..
     } = LayoutProps::from_depot(depot).await;
-    Text::Html(render_lazy(html! {
-        <Layout csrf_token={csrf_token} live_view={live_view} current_user={current_user.unwrap_or_default()}>
-            <Home />
-        </Layout>
+    Text::Html(render_lazy(rsx! {
+        Layout {
+            csrf_token: csrf_token,
+            current_user: current_user,
+            Home {}
+        }
     }))
 }
 
@@ -358,6 +384,17 @@ impl NewUser {
 async fn signup(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<()> {
     let new_user: NewUser = req.parse_form().await?;
     let user: User = new_user.insert().await?;
+    // make links for every social icon on the home page
+    // 3 pieces of data
+    // 1. the name of the website
+    // 2. the url
+    // 3. icon itself
+    let links = Link::default_links();
+    for mut link in links {
+        link.url = format!("{}{}", link.url, user.username);
+        link.user_id = user.id;
+        let _ = link.create().await;
+    }
     let session = depot.session_mut().unwrap();
     _ = session.insert("user_id", user.id)?;
     res.render(Redirect::other(format!("/@{}", user.username)));
@@ -386,14 +423,15 @@ fn Login<'a>(cx: Scope, message: Option<&'a str>) -> Element<'a> {
 async fn get_login(depot: &mut Depot) -> Text<String> {
     let LayoutProps {
         csrf_token,
-        live_view,
         current_user,
         ..
     } = LayoutProps::from_depot(depot).await;
-    Text::Html(render_lazy(html! {
-        <Layout csrf_token={csrf_token} live_view={live_view} current_user={current_user.unwrap_or_default()}>
-            <Login />
-        </Layout>
+    Text::Html(render_lazy(rsx! {
+        Layout {
+            csrf_token: csrf_token,
+            current_user: current_user,
+            Login {}
+        }
     }))
 }
 
@@ -441,65 +479,280 @@ impl Link {
         .execute(db())
         .await
     }
+
+    async fn create(&self) -> Result<SqliteQueryResult, sqlx::Error> {
+        let name = if let Some(n) = &self.name {
+            n.to_owned()
+        } else {
+            String::default()
+        };
+        sqlx::query!(
+            "insert into links (user_id, url, name) values (?, ?, ?)",
+            self.user_id,
+            self.url,
+            self.name
+        )
+        .execute(db())
+        .await
+    }
+
+    async fn find_by_id(id: i64) -> Option<Link> {
+        sqlx::query_as!(Link, "select * from links where id = ?", id,)
+            .fetch_one(db())
+            .await
+            .ok()
+    }
+
+    async fn update(&self) -> Result<Link, sqlx::Error> {
+        sqlx::query_as!(
+            Link,
+            "update links set name = ?, url = ?, updated_at = unixepoch() where id = ? returning id as 'id!', user_id as 'user_id!', url as 'url!', name, updated_at, created_at as 'created_at!'",
+            self.name,
+            self.url,
+            self.id
+        ).fetch_one(db()).await
+    }
+
+    fn parse_name(name_and_url: &String) -> Option<String> {
+        let start = name_and_url.find('[');
+        let end = name_and_url.find(']');
+        match (start, end) {
+            (Some(first), Some(last)) => Some((&name_and_url)[(first + 1)..last].to_owned()),
+            _ => None,
+        }
+    }
+
+    fn parse_url(name_and_url: &String) -> String {
+        let start = name_and_url.find('(');
+        let end = name_and_url.find(')');
+        match (start, end) {
+            (Some(first), Some(last)) => (&name_and_url)[(first + 1)..last].to_owned(),
+            _ => String::default(),
+        }
+    }
+
+    fn new(url: &str, name: &str) -> Self {
+        Link {
+            url: url.to_owned(),
+            name: Some(name.to_owned()),
+            id: 0,
+            user_id: 0,
+            updated_at: None,
+            created_at: 0,
+        }
+    }
+
+    fn icon(&self) -> Icon {
+        if self.url.contains("twitter.com") {
+            Icon::Twitter
+        } else if self.url.contains("twitch.tv") {
+            Icon::Twitch
+        } else {
+            Icon::Globe
+        }
+    }
+
+    fn url_from_icon(icon: Icon) -> String {
+        let s = match icon {
+            Icon::Twitch => "https://twitch.tv/",
+            Icon::Twitter => "https://twitter.com/",
+            Icon::Instagram => "https://instagram.com/",
+            Icon::Youtube => "https://youtube.com/",
+            Icon::Tiktok => "https://tiktok.com/",
+            Icon::Discord => "https://discord.com/",
+            Icon::Github => "https://github.com/",
+            Icon::Stackoverflow => "https://stackoverflow.com/",
+            Icon::Globe => "",
+        };
+        return s.to_string();
+    }
+
+    fn default_links() -> Vec<Link> {
+        vec![
+            Link::new("twitch.tv/", "twitch"),
+            Link::new("twitter.com/", "twitter"),
+            Link::new("instagram.com/", "instagram"),
+            Link::new("youtube.com/", "youtube"),
+            Link::new("tiktok.com/", "tiktok"),
+            Link::new("discord.com/", "discord"),
+            Link::new("github.com/", "github"),
+            Link::new("stackoverflow.com/", "stackoverflow"),
+        ]
+    }
 }
 
 #[inline_props]
-fn LinkComponent(cx: Scope, link: Link) -> Element {
+fn LinkIconComponent<'a>(cx: Scope, name_and_url: &'a String) -> Element<'a> {
+    cx.render(rsx!(if name_and_url.contains("twitter.com") {
+        rsx! {
+            Icon {
+                width: 32,
+                height: 32,
+                icon: BsTwitter
+            }
+        }
+    } else if name_and_url.contains("twitch.tv") {
+        rsx! {
+            Icon {
+                width: 32,
+                height: 32,
+                icon: BsTwitch
+            }
+        }
+    } else {
+        rsx! {
+            Icon {
+                width: 32,
+                height: 32,
+                icon: BsGlobe,
+            }
+        }
+    }))
+}
+
+#[inline_props]
+fn LinkComponent<'a>(
+    cx: Scope,
+    link: Link,
+    is_deleting: &'a bool,
+    on_delete: EventHandler<'a, &'a Link>,
+) -> Element {
     let link_name = match &link.name {
         Some(n) => n,
-        None => &link.url
+        None => &link.url,
     };
+    let name_and_url = use_state(cx, || format!("[{}]({})", link_name, link.url));
     let is_editing = use_state(cx, || false);
     let edit_clicked = move || {
         is_editing.set(true);
     };
-    cx.render(
-        if *is_editing.get() {
-            rsx! {
-                div {
-                    class: "w-full flex gap-4",
-                    TextField {
-                        lbl: "name",
-                        name: "name",
-                        autofocus: true,
-                        value: "{link_name}",
+    let link_state = use_state(cx, || link.clone());
+    let id = link.id;
+    let on_enter = move || {
+        to_owned![name_and_url, is_editing, link_state];
+        cx.spawn(async move {
+            if let Some(mut l) = Link::find_by_id(id).await {
+                l.name = Link::parse_name(name_and_url.get());
+                l.url = Link::parse_url(name_and_url.get());
+                match l.update().await {
+                    Ok(link) => {
+                        link_state.set(link);
+                        is_editing.set(false);
                     }
-                    TextField {
-                        lbl: "url",
-                        name: "url",
-                        autofocus: false,
-                        value: "{link.url}"
+                    _ => (),
+                }
+            }
+        });
+    };
+    let on_escape = move || {
+        is_editing.set(false);
+    };
+    let url = &link_state.get().url;
+    let name = &link_state.get().name;
+    cx.render(if *is_editing.get() {
+        rsx! {
+            div {
+                class: "flex gap-4",
+                LinkIconComponent {
+                    name_and_url: name_and_url.get()
+                },
+                TextField {
+                    name: "name_and_url",
+                    autofocus: true,
+                    value: "{name_and_url}",
+                    oninput: move |event: Event<FormData>| {
+                        let val = event.value.clone();
+                        name_and_url.set(val);
+                    },
+                    onblur: move |_: Event<FocusData>| {
+                        is_editing.set(false);
+                    },
+                    onkeypress: move |event: Event<KeyboardData>| {
+                        match event.code() {
+                            Code::Enter => {
+                                on_enter();
+                            },
+                            Code::Escape => {
+                                on_escape();
+                            },
+                            _ => {}
+                        }
                     }
                 }
             }
-        } else {
-            rsx! {
+        }
+    } else {
+        rsx! {
+            div {
+                class: "flex gap-4 items-center",
+                LinkIconComponent {
+                    name_and_url: name_and_url.get()
+                }
                 a {
-                    href: "{link.url}",
+                    class: "px-2 py-3 dark:bg-yellow-400 dark:text-zinc-900 rounded-md",
+                    href: "{url}",
                     onclick: move |event| {
                         event.stop_propagation();
-                        edit_clicked()  
+                        edit_clicked()
                     },
-                    "{link_name}"
+                    if let Some(n) = name {
+                        rsx! {
+                            "{n}"
+                        }
+                    } else {
+                        rsx! {
+                            "{url}"
+                        }
+                    }
                 }
-            } 
+                if **is_deleting {
+                    rsx!(
+                        DeleteButton {
+                            onclick: move |event| on_delete.call(link)
+                        }
+                    )
+                }
+            }
         }
-    )
+    })
 }
 
 #[inline_props]
-fn LinkList(cx: Scope, links: Option<Vec<Link>>) -> Element {
+fn DeleteButton<'a>(cx: Scope, onclick: EventHandler<'a, MouseEvent>) -> Element<'a> {
+    cx.render(rsx!(CircleButton {
+        onclick: move |event| onclick.call(event),
+        disabled: false,
+        div {
+            class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+            Icon {
+                width: 40,
+                height: 40,
+                icon: BsX
+            }
+        }
+    }))
+}
+
+#[inline_props]
+fn LinkList<'a>(
+    cx: Scope,
+    links: Option<Vec<Link>>,
+    is_deleting: bool,
+    on_delete: EventHandler<'a, &'a Link>,
+) -> Element {
     if links.is_none() {
         return None;
     }
     cx.render(rsx!(
         div {
-            class: "flex flex-col mx-auto gap-8 items-center h-full w-full",
+            class: "flex flex-col gap-8 items-start h-full",
             links.clone().unwrap().into_iter().map(|link| {
                 rsx! {
                    LinkComponent {
                         key: "{link.id}",
                         link: link,
+                        is_deleting: is_deleting,
+                        on_delete: move |link| on_delete.call(link)
                    }
                 }
             })
@@ -507,11 +760,13 @@ fn LinkList(cx: Scope, links: Option<Vec<Link>>) -> Element {
     ))
 }
 
-#[inline_props]
-fn Profile(cx: Scope, links: Vec<Link>) -> Element {
-    let app_state = use_shared_state::<AppState>(cx).unwrap();
-    let current_user = app_state.read().current_user.clone().unwrap();
-    let links_state = use_state(cx, || links.clone());
+#[derive(Props, PartialEq)]
+struct ProfileProps<'a> {
+    #[props(!optional)]
+    current_user: Option<&'a User>,
+}
+
+fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
     let loading = use_state(cx, || false);
     let User {
         photo,
@@ -519,34 +774,60 @@ fn Profile(cx: Scope, links: Vec<Link>) -> Element {
         bio,
         id,
         ..
-    } = current_user;
+    } = cx.props.current_user.unwrap();
+    let links_future = use_future(cx, (loading,), |_| {
+        to_owned![id];
+        async move { Link::all_by_user_id(id).await }
+    });
+    let links = links_future.value().unwrap().clone();
     let add_link = move || {
-        let user_id = current_user.id;
-        to_owned![links_state, loading];
+        to_owned![loading, id];
         cx.spawn(async move {
-            let _ = Link::insert(current_user.id, "https://example.com")
-                .await
-                .unwrap();
-            let new_links = Link::all_by_user_id(user_id).await;
+            let _ = Link::insert(id, "https://example.com").await.unwrap();
             loading.set(false);
-            links_state.set(new_links.clone());
         });
     };
     let delete_last_link = move || {
-        to_owned![links_state, loading];
-        let user_id = current_user.id;
+        to_owned![loading, id];
         cx.spawn(async move {
             if let Some(link) = Link::last().await {
                 let _ = link.delete().await;
-                let new_links = Link::all_by_user_id(user_id).await;
                 loading.set(false);
-                links_state.set(new_links.clone());
             }
         });
     };
+    let bio = match bio {
+        Some(b) => b.clone(),
+        _ => String::with_capacity(0),
+    };
+    let add_link_clicked = use_state(cx, || false);
+    let is_deleting = use_state(cx, || false);
+    let on_add_link_click = move || {
+        add_link_clicked.set(!add_link_clicked);
+    };
+    let on_delete_link_click = move || {
+        is_deleting.set(!is_deleting);
+    };
+    let on_delete = move |link: &Link| {
+        to_owned![loading, link];
+        cx.spawn(async move {
+            let _ = link.delete().await;
+            loading.set(false);
+        });
+    };
     cx.render(rsx! {
+        if *add_link_clicked.get() {
+            rsx! (
+                AddLinkModal {
+                    on_close: move |_| {
+                        on_add_link_click();
+                        links_future.restart();
+                    }
+                }
+            )
+        }
         div {
-            class: "flex flex-col max-w-3xl mx-auto gap-8 text-center items-center h-full relative w-full",
+            class: "flex flex-col max-w-3xl mx-auto gap-8 text-center items-center h-full relative w-full mb-24 mt-8 relative",
             {
                 match photo {
                     Some(p) => rsx! {
@@ -561,35 +842,21 @@ fn Profile(cx: Scope, links: Vec<Link>) -> Element {
             }
             div {
                 class: "font-bold text-xl",
-                "@{username}"
+                "Editing @{username}"
             }
-            div {
-                match bio {
-                    Some(b) => b,
-                    _ => String::default()
-                }
-            }
+            div { bio }
             LinkList {
-                links: links_state.get().clone()
+                links: links,
+                is_deleting: *is_deleting.get(),
+                on_delete: move |link| { loading.set(true); on_delete(link); },
             }
             div {
-                class: "absolute bottom-2 right-2",
-                div {
-                    class: "flex flex-col gap-8",
-                    DeleteLinkButton {
-                        onclick: move |_| {
-                            loading.set(true);
-                            delete_last_link();
-                        },
-                        disabled: *loading.get()
-                    }
-                    AddLinkButton {
-                        onclick: move |_| {
-                            loading.set(true);
-                            add_link();
-                        },
-                        disabled: *loading.get()
-                    }
+                class: "fixed right-2 bottom-2",
+                AddLinkButton {
+                    onclick: move |_| on_add_link_click(),
+                }
+                DeleteLinkButton {
+                    onclick: move |_| on_delete_link_click(),
                 }
             }
         }
@@ -608,19 +875,22 @@ async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) ->
     let session = depot.session_mut().unwrap();
     if let Some(u) = maybe_user {
         session.insert("user_id", u.id).unwrap();
-        res.render(Redirect::other(format!("/@{}", u.username)));
+        res.render(Redirect::other(PROFILE));
     } else {
         // TODO exponential backoff
         let LayoutProps {
             csrf_token,
-            live_view,
             current_user,
             ..
         } = LayoutProps::from_depot(depot).await;
-        res.render(Text::Html(render_lazy(html! {
-            <Layout csrf_token={csrf_token} live_view={live_view} current_user={current_user.unwrap_or_default()}>
-                <Login message="Invalid login code" />
-            </Layout>
+        res.render(Text::Html(render_lazy(rsx! {
+            Layout {
+                csrf_token: csrf_token,
+                current_user: current_user,
+                Login {
+                    message: "Invalid login code"
+                }
+            }
         })));
     }
     return Ok(());
@@ -649,34 +919,300 @@ fn Submit<'a>(cx: Scope, value: &'a str) -> Element<'a> {
     })
 }
 
-#[inline_props]
-fn Nav(cx: Scope, username: Option<String>) -> Element {
-    let name = username.clone().unwrap_or_default();
-    cx.render(html! {
-        <nav class="flex gap-8 justify-center py-8">
-            <a href={HOME}>"Home"</a>
-            {
-                if name != String::default() {
-                    cx.render(
-                        html! {
-                            <div class="flex gap-8">
-                                <a href={PROFILE}>"Profile"</a>
-                                <Form action={LOGOUT}>
-                                    <Submit value="Logout" />
-                                </Form>
-                            </div>
-                        }
-                    )
-                } else {
-                    cx.render(
-                        html! {
-                            <a href={LOGIN}>"Login"</a>
-                        }
-                    )
+#[derive(Props)]
+struct IconListProps<'a> {
+    #[props(optional)]
+    onclick: Option<EventHandler<'a, Icon>>,
+}
+
+fn IconList<'a>(cx: Scope<'a, IconListProps<'a>>) -> Element {
+    let on_click = |icon: Icon| {
+        if let Some(click) = cx.props.onclick.as_ref() {
+            click.call(icon);
+        }
+    };
+    cx.render(rsx!(
+        div {
+            class: "grid grid-cols-4 gap-8 md:mx-auto",
+            button {
+                onclick: move |_| on_click(Icon::Github),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsGithub
                 }
             }
-        </nav>
+            button {
+                onclick: move |_| on_click(Icon::Twitter),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsTwitter
+                }
+            },
+            button {
+                onclick: move |_| on_click(Icon::Discord),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsDiscord
+                }
+            },
+            button {
+                onclick: move |_| on_click(Icon::Tiktok),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsTiktok
+                }
+            },
+            button {
+                onclick: move |_| on_click(Icon::Twitch),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsTwitch
+                }
+            },
+            button {
+                onclick: move |_| on_click(Icon::Youtube),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsYoutube
+                }
+            },
+            button {
+                onclick: move |_| on_click(Icon::Stackoverflow),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsStackOverflow
+                }
+            },
+            button {
+                onclick: move |_| on_click(Icon::Instagram),
+                Icon {
+                    width: 32,
+                    height: 32,
+                    icon: BsInstagram
+                }
+            },
+        }
+    ))
+}
+
+#[inline_props]
+fn AddLinkModal<'a>(cx: Scope, on_close: EventHandler<'a, ()>) -> Element<'a> {
+    let app_state = use_shared_state::<AppState>(cx);
+    let current_user = app_state.unwrap().read().current_user.clone().unwrap();
+    let username = use_state(cx, || current_user.username);
+    let user_id = current_user.id;
+    let mut step = use_state(cx, || 0);
+    let url = use_state(cx, || String::new());
+    let name = use_state(cx, || String::new());
+    let on_icon_click = move |icon: Icon| {
+        to_owned![step, url];
+        let new_url = Link::url_from_icon(icon);
+        url.set(new_url);
+        step += 1;
+    };
+    let mut on_enter = move || step += 1;
+    let on_escape = move || {};
+    let mut on_next = move || {
+        name.set(format!("{}{}", url, username));
+        url.set(format!("{}{}", url, username));
+        step += 1;
+    };
+    let on_save = move || {
+        to_owned![step, url, name];
+
+        cx.spawn(async move {
+            let mut link = Link::new(url.get(), name.get());
+            link.user_id = user_id;
+            let _ = link.create().await;
+            step += 1;
+        });
+    };
+    if *step.get() == 3 {
+        cx.props.on_close.call(());
+        return None;
+    }
+    cx.render(rsx!(div {
+        class: "max-w-3xl w-3/4 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-6 bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-20",
+        {
+            match *step.get() {
+                0 => rsx!(
+                    div {
+                        class: "flex flex-col gap-4",
+                        h1 {
+                            class: "text-2xl lg:text-4xl text-center",
+                            "Add a link"
+                        }
+                        IconList {
+                            onclick: move |icon| on_icon_click(icon)
+                        }
+                    }
+                ),
+                1 => rsx!(
+                    div {
+                        class: "flex flex-col gap-4",
+                        h1 {
+                            class: "text-2xl lg:text-4xl text-center",
+                            "Enter username"
+                        }
+                        TextField {
+                            name: "username",
+                            autofocus: true,
+                            value: "{username}",
+                            oninput: move |event: Event<FormData>| {
+                                let val = event.value.clone();
+                                username.set(val);
+                            },
+                            onkeypress: move |event: Event<KeyboardData>| {
+                                match event.code() {
+                                    Code::Enter => {
+                                        on_enter();
+                                    },
+                                    Code::Escape => {
+                                        on_escape();
+                                    },
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Button {
+                            onclick: move |_| on_next(),
+                            "Next"
+                        }
+                    }
+                ),
+                2 => rsx!(
+                    div {
+                        class: "flex flex-col gap-4",
+                        h1 {
+                            class: "text-2xl lg:text-4xl text-center",
+                            "Change link name"
+                        }
+                        TextField {
+                            name: "name",
+                            value: "{name}",
+                            oninput: move |event: Event<FormData>| {
+                                let val = event.value.clone();
+                                name.set(val);
+                            }
+                        }
+                        Button {
+                            onclick: move |_| on_save(),
+                            "Save"
+                        }
+                    }
+                ),
+                _ => rsx!(div{})
+            }
+        }
+    }))
+}
+
+#[derive(Props, PartialEq)]
+struct NavProps<'a> {
+    #[props(!optional)]
+    user: Option<&'a User>,
+}
+
+fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
+    cx.render(rsx! {
+        nav {
+            class: "gap-8 justify-center py-8 hidden md:flex",
+            a {
+                href: HOME,
+                "Home"
+            }
+            {
+                match &cx.props.user {
+                    Some(_) => {
+                        rsx! {
+                            div {
+                                class: "flex gap-8",
+                                a {
+                                    href: PROFILE,
+                                    "Profile"
+                                }
+                                Form {
+                                    action: LOGOUT,
+                                    Submit {
+                                        value: "Logout"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    _ => rsx! {
+                        a {
+                            href: LOGIN,
+                            "Login"
+                        }
+                    }
+                }
+            }
+        }
+        nav {
+            class: "flex md:hidden lg:hidden justify-between items-center fixed bottom-0 left-0 right-0 z-10",
+            NavButton {
+                a {
+                    href: HOME,
+                    class: "flex flex-col justify-center items-center",
+                    Icon {
+                        width: 16,
+                        height: 16,
+                        icon: BsHouseFill
+                    }
+                    div {
+                        "Home" 
+                    }
+                }
+            }
+            NavButton {
+                a {
+                    href: PROFILE,
+                    class: "flex flex-col justify-center items-center",
+                    Icon {
+                        width: 16,
+                        height: 16,
+                        icon: BsPersonCircle
+                    }
+                    div {
+                        "Profile"
+                    }
+                }
+            }
+            NavButton {
+                Form {
+                    action: LOGOUT,
+                    button {
+                        class: "flex flex-col justify-center items-center",
+                        r#type: "submit",
+                        Icon {
+                            width: 16,
+                            height: 16,
+                            icon: BsDoorOpenFill
+                        }
+                        div {
+                            "Logout"
+                        }
+                    }
+                }
+            }
+        }
     })
+}
+
+#[inline_props]
+fn NavButton<'a>(cx: Scope, children: Element<'a>) -> Element<'a> {
+    cx.render(rsx!(div {
+        class: "bg-zinc-700 text-yellow-400 py-4 flex flex-auto text-center justify-center",
+        &cx.props.children
+    }))
 }
 
 #[inline_props]
@@ -703,20 +1239,20 @@ fn CircleButton<'a>(
     let is_disabled = match disabled {
         Some(true) => true,
         Some(false) => false,
-        _ => false
+        _ => false,
     };
     let disabled_str = match is_disabled {
         true => "",
         false => "false",
     };
     let on_click = move |event| {
-        if !is_disabled {                    
+        if !is_disabled {
             onclick.call(event)
         }
     };
     cx.render(rsx! {
         button {
-            class: "rounded-full dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 p-4 w-16 h-16 disabled:opacity-50",
+            class: "rounded-full dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 p-3 w-12 h-12 disabled:opacity-50",
             disabled: "{disabled_str}",
             onclick: on_click,
             &cx.props.children
@@ -777,6 +1313,9 @@ fn TextField<'a>(
     lbl: Option<&'a str>,
     autofocus: Option<bool>,
     value: Option<&'a str>,
+    onblur: Option<EventHandler<'a, Event<FocusData>>>,
+    onkeypress: Option<EventHandler<'a, KeyboardEvent>>,
+    oninput: Option<EventHandler<'a, Event<FormData>>>,
     placeholder: Option<&'a str>,
 ) -> Element<'a> {
     let autofocus_attr = if let Some(_) = *autofocus {
@@ -791,13 +1330,28 @@ fn TextField<'a>(
         label {
             class: "flex flex-col gap-2",
             "{label_}"
-            input { 
+            input {
                 r#type: "text",
                 name: "{name}",
                 autofocus: "{autofocus_attr}",
                 placeholder: "{place_holder}",
                 class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
                 value: "{val}",
+                onkeypress: |event| {
+                    if let Some(kp) = onkeypress.as_ref() {
+                        kp.call(event);
+                    }
+                },
+                oninput: |event| {
+                    if let Some(inp) = oninput.as_ref() {
+                        inp.call(event);
+                    }
+                },
+                onblur: |event| {
+                    if let Some(ev) = onblur.as_ref() {
+                        ev.call(event)
+                    }
+                }
             }
         }
     ));
@@ -805,17 +1359,16 @@ fn TextField<'a>(
 
 fn app(cx: Scope<AppProps>) -> Element {
     let AppProps {
+        csrf_token,
         current_user,
-        links,
+        ..
     } = cx.props;
     use_shared_state_provider(cx, || AppState {
-        csrf_token: String::default(),
+        csrf_token: csrf_token.to_owned(),
         current_user: Some(current_user.clone()),
     });
     return cx.render(rsx! {
-        Profile {
-            links: links.clone()
-        }
+        Profile { current_user: Some(current_user) }
     });
 }
 
@@ -844,12 +1397,11 @@ async fn public_profile(
         ..
     } = user;
     let links = Link::all_by_user_id(id).await;
-    let props =  LayoutProps::from_depot(depot).await;
+    let props = LayoutProps::from_depot(depot).await;
     res.render(Text::Html(render_lazy(rsx! (
         Layout {
             csrf_token: props.csrf_token,
-            current_user: props.current_user.unwrap_or_default(),
-            live_view: String::default(),
+            current_user: props.current_user,
             div {
                 class: "flex flex-col max-w-3xl mx-auto gap-8 text-center items-center h-full relative w-full",
                 {
@@ -872,7 +1424,9 @@ async fn public_profile(
                     "{bio:?}"
                 }
                 LinkList {
-                    links: links
+                    links: links,
+                    is_deleting: false,
+                    on_delete: move |_| (),
                 }
         }
     }))));
@@ -880,21 +1434,21 @@ async fn public_profile(
 }
 
 #[handler]
-async fn profile(
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), StatusError> {
-    let props = LayoutProps::from_depot(depot).await;
-    res.render(Text::Html(render_lazy(rsx! {
+async fn profile(res: &mut Response, depot: &mut Depot) -> Result<(), StatusError> {
+    let LayoutProps {
+        current_user,
+        csrf_token,
+        liveview_js,
+        ..
+    } = LayoutProps::from_depot(depot).await;
+    res.render(Text::Html(render_lazy(rsx! (
         Layout {
-            csrf_token: props.csrf_token,
-            current_user: props.current_user.unwrap_or_default(),
-            live_view: props.live_view,
-            div {
-                id: "main"
-            }
+            csrf_token: csrf_token,
+            current_user: current_user,
+            liveview_js: liveview_js.unwrap(),
+            div { id: "main" },
         }
-    })));
+    ))));
     return Ok(());
 }
 
@@ -912,11 +1466,22 @@ async fn connect(
     if addr != origin {
         return Err(salvo::http::StatusError::not_found());
     }
-    let maybe_user = depot.obtain::<User>().cloned();
     let view = depot.obtain::<Arc<LiveViewPool>>().unwrap().clone();
+    let maybe_user = depot.obtain::<User>().cloned();
+    let liveview_js = match &maybe_user {
+        Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
+            "ws://{}/ws?username={}",
+            addr, username
+        ))),
+        _ => None,
+    };
+    let csrf_token = depot
+        .csrf_token()
+        .map(|s| &**s)
+        .unwrap_or_default()
+        .to_string();
 
     if let Some(current_user) = maybe_user {
-        let links = Link::all_by_user_id(current_user.id).await;
         WebSocketUpgrade::new()
             .upgrade(req, res, |ws| async move {
                 _ = view
@@ -924,8 +1489,8 @@ async fn connect(
                         dioxus_liveview::salvo_socket(ws),
                         app,
                         AppProps {
+                            csrf_token,
                             current_user,
-                            links,
                         },
                     )
                     .await
