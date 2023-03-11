@@ -8,11 +8,13 @@ use anyhow::Result;
 use database::db;
 use dioxus::html::input_data::keyboard_types::Code;
 use dioxus::prelude::*;
+use dioxus_elements::input_data::keyboard_types::Key;
 use dioxus_free_icons::icons::bs_icons::*;
 use dioxus_free_icons::Icon;
 use dioxus_html_macro::html;
 use dioxus_liveview::LiveViewPool;
 use dioxus_ssr::render_lazy;
+use fermi::*;
 use rand::Rng;
 use rust_embed::RustEmbed;
 use salvo::affix;
@@ -29,6 +31,8 @@ use std::convert::TryInto;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
 use tracing::{debug, Level};
 
 pub const HOME: &str = "/";
@@ -36,6 +40,9 @@ pub const LOGIN: &str = "/login";
 pub const LOGOUT: &str = "/logout";
 pub const PROFILE: &str = "/profile";
 pub const PUBLIC_PROFILE: &str = "/@<username>";
+
+static USER: Atom<User> = |_| User::default();
+static LINKS: Atom<Vec<Link>> = |_| vec![];
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -69,7 +76,7 @@ async fn auth(depot: &mut Depot) -> Result<(), salvo::http::StatusError> {
 }
 
 #[handler]
-async fn set_user(depot: &mut Depot) {
+async fn set_current_user_handler(depot: &mut Depot) {
     let maybe_id: Option<i64> = depot.session().unwrap().get("user_id");
     if let Some(id) = maybe_id {
         let user = sqlx::query_as!(User, "select id, username, login_code, updated_at, created_at, bio, photo from users where id = ?", id)
@@ -99,7 +106,7 @@ fn routes() -> Router {
             Router::new()
                 .hoop(session_handler)
                 .hoop(csrf_handler)
-                .hoop(set_user)
+                .hoop(set_current_user_handler)
                 .push(
                     Router::new()
                         .get(home)
@@ -145,6 +152,7 @@ fn Form<'a>(cx: Scope, action: &'a str, children: Element<'a>) -> Element<'a> {
 struct AppProps {
     csrf_token: String,
     current_user: User,
+    links: Vec<Link>,
 }
 
 #[derive(Default, PartialEq)]
@@ -209,10 +217,10 @@ fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element<'a> {
                     meta { charset: "utf-8" }
                     meta { name: "viewport", content:"width=device-width" }
                     link { rel: "stylesheet", href: "/output.css" }
-                    style { "#main {{ height: calc(100vh - 88px); }}" }
+                    // style { "#main {{ height: calc(100vh - 88px); }}" }
                 }
                 body {
-                    class: "dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto",
+                    class: "dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto mb-[100px]",
                     Nav { user: cx.props.current_user }
                     &cx.props.children
                     "{liveview_js}"
@@ -330,6 +338,15 @@ impl User {
             .fetch_one(db())
             .await;
     }
+
+    async fn update(&self) -> Result<User, sqlx::Error> {
+        sqlx::query_as!(
+            User,
+            "update users set bio = ?, updated_at = unixepoch() where id = ? returning id as 'id!', bio, photo, username as 'username!', login_code as 'login_code!', updated_at, created_at as 'created_at!'",
+            self.bio,
+            self.id
+        ).fetch_one(db()).await
+    }
 }
 
 #[derive(Deserialize)]
@@ -445,11 +462,16 @@ impl Link {
             .await
     }
 
-    async fn insert<'a>(user_id: i64, url: &'a str) -> Result<SqliteQueryResult, sqlx::Error> {
+    async fn insert<'a>(
+        user_id: i64,
+        url: &'a str,
+        name: Option<&'a str>,
+    ) -> Result<SqliteQueryResult, sqlx::Error> {
         sqlx::query!(
-            "insert into links (user_id, url) values (?, ?)",
+            "insert into links (user_id, url, name) values (?, ?, ?)",
             user_id,
-            url
+            url,
+            name
         )
         .execute(db())
         .await
@@ -693,33 +715,39 @@ fn LinkComponent<'a>(
     } else {
         rsx! {
             div {
-                class: "flex gap-4 items-center",
-                LinkIconComponent {
-                    link: link
-                }
-                a {
-                    class: "px-2 py-3 dark:bg-yellow-400 dark:text-zinc-900 rounded-md",
-                    href: "{url}",
-                    onclick: move |event| {
-                        event.stop_propagation();
-                        edit_clicked()
-                    },
-                    if let Some(n) = name {
-                        rsx! {
-                            "{n}"
-                        }
-                    } else {
-                        rsx! {
-                            "{url}"
+                class: "relative",
+                div {
+                    class: "flex gap-4 items-center",
+                    LinkIconComponent {
+                        link: link
+                    }
+                    a {
+                        class: "px-2 py-3 dark:bg-yellow-400 dark:text-zinc-900 rounded-md",
+                        href: "{url}",
+                        onclick: move |event| {
+                            event.stop_propagation();
+                            edit_clicked()
+                        },
+                        if let Some(n) = name {
+                            rsx! {
+                                "{n}"
+                            }
+                        } else {
+                            rsx! {
+                                "{url}"
+                            }
                         }
                     }
                 }
                 if **is_deleting {
-                    rsx!(
-                        DeleteButton {
-                            onclick: move |event| on_delete.call(link)
+                    rsx! {
+                        div {
+                            class: "absolute -right-3 -top-3",
+                            DeleteButton {
+                                onclick: move |event| on_delete.call(link)
+                            }
                         }
-                    )
+                    }
                 }
             }
         }
@@ -728,17 +756,17 @@ fn LinkComponent<'a>(
 
 #[inline_props]
 fn DeleteButton<'a>(cx: Scope, onclick: EventHandler<'a, MouseEvent>) -> Element<'a> {
-    cx.render(rsx!(CircleButton {
+    cx.render(rsx!(CircleButtonSmall {
         onclick: move |event| onclick.call(event),
         disabled: false,
-        div {
-            class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+        // div {
+        //     class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-2",
             Icon {
-                width: 40,
-                height: 40,
-                icon: BsX
+                width: 24,
+                height: 24,
+                icon: BsDash
             }
-        }
+        // }
     }))
 }
 
@@ -769,74 +797,82 @@ fn LinkList<'a>(
     ))
 }
 
-#[derive(Props, PartialEq)]
-struct ProfileProps<'a> {
-    #[props(!optional)]
-    current_user: Option<&'a User>,
+fn Bio(cx: Scope) -> Element {
+    let user: &User = use_read(cx, USER);
+    let set_user = use_set(cx, USER);
+    let onenter = move |_| {
+        to_owned![set_user, user];
+        cx.spawn(async move {
+            match user.update().await {
+                Ok(user) => {
+                    set_user(user);
+                }
+                _ => (),
+            }
+        });
+    };
+    let oninput = move |event: FormEvent| {
+        to_owned![user];
+        user.bio = Some(event.value.clone());
+        set_user(user);
+    };
+    let bio = match &user.bio {
+        Some(b) => b.clone(),
+        None => "Add your bio here".to_string(),
+    };
+    cx.render(rsx! {
+        div {
+            class: "w-full px-4",
+            MultilineTextInput {
+                value: bio,
+                autofocus: true,
+                oninput: oninput,
+                onenter: onenter,
+            }
+        }
+    })
 }
 
-fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
+fn Profile(cx: Scope) -> Element {
+    let user = use_read(cx, USER);
+    let links = use_read(cx, LINKS);
+    let set_links = use_set(cx, LINKS);
     let loading = use_state(cx, || false);
+    let url = use_state(cx, || String::default());
+    let name= use_state(cx, || String::default());
     let User {
         photo,
         username,
         bio,
         id,
         ..
-    } = cx.props.current_user.unwrap();
-    let links_future = use_future(cx, (loading,), |_| {
-        to_owned![id];
-        async move { Link::all_by_user_id(id).await }
-    });
-    let links = links_future.value().unwrap().clone();
-    let add_link = move || {
-        to_owned![loading, id];
-        cx.spawn(async move {
-            let _ = Link::insert(id, "https://example.com").await.unwrap();
-            loading.set(false);
-        });
-    };
-    let delete_last_link = move || {
-        to_owned![loading, id];
-        cx.spawn(async move {
-            if let Some(link) = Link::last().await {
-                let _ = link.delete().await;
-                loading.set(false);
-            }
-        });
-    };
-    let bio = match bio {
-        Some(b) => b.clone(),
-        _ => String::with_capacity(0),
-    };
-    let add_link_clicked = use_state(cx, || false);
-    let is_deleting = use_state(cx, || false);
-    let on_add_link_click = move || {
-        add_link_clicked.set(!add_link_clicked);
-    };
-    let on_delete_link_click = move || {
-        is_deleting.set(!is_deleting);
-    };
+    } = user;
     let on_delete = move |link: &Link| {
-        to_owned![loading, link];
+        to_owned![link, set_links, user];
         cx.spawn(async move {
             let _ = link.delete().await;
-            loading.set(false);
+            let links = Link::all_by_user_id(user.id).await;
+            set_links(links);
         });
     };
+    let on_add = move || {
+        to_owned![url, name, user, set_links];
+        cx.spawn(async move {
+            let _ = Link::insert(user.id, url.get().as_ref(), Some(name.get().as_ref())).await;
+            let links = Link::all_by_user_id(user.id).await;
+            set_links(links);
+        });
+    };
+    let on_icon_click = move |icon| {
+        to_owned![url];
+        let u = Link::url_from_icon(icon);
+        let new_url = format!("{}{}", u, username);
+        url.set(new_url);
+    };
+    let sheet_shown = use_state(cx, || false);
     cx.render(rsx! {
-        if *add_link_clicked.get() {
-            rsx! (
-                AddLinkModal {
-                    on_close: move |_| {
-                        on_add_link_click();
-                        links_future.restart();
-                    }
-                }
-            )
-        }
         div {
-            class: "flex flex-col max-w-3xl mx-auto gap-8 text-center items-center h-full relative w-full mb-24 mt-8 relative",
+            class: "flex flex-col max-w-3xl mx-auto gap-8 items-center h-full relative w-full sm:mb-24 mt-8 relative",
             {
                 match photo {
                     Some(p) => rsx! {
@@ -853,20 +889,56 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
                 class: "font-bold text-xl",
                 "Editing @{username}"
             }
-            div { bio }
+            Bio {}
             LinkList {
-                links: links,
-                is_deleting: *is_deleting.get(),
+                links: links.to_vec(),
+                is_deleting: true,
                 on_delete: move |link| { loading.set(true); on_delete(link); },
             }
-            div {
-                class: "fixed right-2 bottom-2",
-                AddLinkButton {
-                    onclick: move |_| on_add_link_click(),
+            if *sheet_shown.get() == true {
+                rsx! {
+                    Sheet {
+                        onclose: move |_| sheet_shown.set(false),
+                        div {
+                            class: "flex flex-col gap-8",
+                            div {
+                                class: "flex flex-col gap-2",
+                                div { class: "font-bold", "select a link" }
+                                IconList {
+                                    onclick: on_icon_click
+                                }
+                            }
+                            div {
+                                class: "flex flex-col gap-2",
+                                label { r#for: "url", class: "font-bold", "change the url" }
+                                TextInput {
+                                    value: url.get(),
+                                    oninput: move |event: FormEvent| url.set(event.value.clone()),
+                                    name: "url"
+                                }
+                            }
+                            div {
+                                class: "flex flex-col gap-2",
+                                label { r#for: "name", class: "font-bold", "add a name instead of url" }
+                                TextInput {
+                                    name: "name",
+                                    value: name.get()
+                                    oninput: move |event: FormEvent| name.set(event.value.clone()),
+                                }
+                            }
+                            RoundedRect {
+                                onclick: move |_| {
+                                    loading.set(true);
+                                    on_add();
+                                },
+                                "Add new link"
+                            }
+                        }
+                    }
                 }
-                DeleteLinkButton {
-                    onclick: move |_| on_delete_link_click(),
-                }
+            }
+            AddLinkButton {
+                onclick: move |_| sheet_shown.set(true),
             }
         }
     })
@@ -915,8 +987,11 @@ fn logout(depot: &mut Depot, res: &mut Response) {
 #[inline_props]
 fn Cta<'a>(cx: Scope, children: Element<'a>) -> Element<'a> {
     cx.render(
-        html! {
-            <button class="dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 rounded-md px-6 py-3 drop-shadow uppercase font-bold text-xl w-full">{&cx.props.children}</button>
+        rsx! {
+            button {
+                class: "dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 rounded-md px-6 py-3 drop-shadow uppercase font-bold text-xl w-full",
+                &cx.props.children
+            }
         }
     )
 }
@@ -1011,11 +1086,67 @@ fn IconList<'a>(cx: Scope<'a, IconListProps<'a>>) -> Element {
     ))
 }
 
+#[derive(Props)]
+struct SheetProps<'a> {
+    children: Element<'a>,
+    onclose: EventHandler<'a>,
+}
+
+fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
+    let shown = use_state(cx, || true);
+    let translate_y = use_state(cx, || "translate-y-full");
+    let _ = use_future(cx, (), |_| {
+        to_owned![translate_y, shown];
+        async move {
+            let duration = Duration::from_millis(0);
+            sleep(duration).await;
+            match *shown.current() {
+                true => translate_y.set("translate-y-0"),
+                false => translate_y.set("translate-y-full")
+            };
+        }
+    });
+    let _ = use_future(cx, (translate_y,), |_| {
+        to_owned![translate_y, shown];
+        async move {
+            let duration = Duration::from_millis(150);
+            sleep(duration).await;
+            if translate_y.current().to_string() == "translate-y-full" {
+                shown.set(false);
+            }
+        }
+    });
+    if *shown.get() == false {
+        cx.props.onclose.call(());
+        return None;
+    }
+    return cx.render(
+        rsx! {
+            div {
+                class: "transition ease-out top-1/3 overflow-y-auto lg:top-0 {translate_y} left-0 right-0 bottom-0 fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
+                &cx.props.children,
+                div {
+                    class: "absolute right-4 top-4",
+                    CircleButtonSmall {
+                        onclick: move |event| translate_y.set("translate-y-full"),
+                        disabled: false,
+                        Icon {
+                            width: 24,
+                            height: 24,
+                            icon: BsX
+                        }
+                    }
+                }
+            }          
+        }
+    );
+}
+
 #[inline_props]
 fn AddLinkModal<'a>(cx: Scope, on_close: EventHandler<'a, ()>) -> Element<'a> {
-    let app_state = use_shared_state::<AppState>(cx);
-    let current_user = app_state.unwrap().read().current_user.clone().unwrap();
-    let username = use_state(cx, || current_user.username);
+    let current_user: &User = use_read(cx, USER);
+    let set_links = use_set(cx, LINKS);
+    let username = use_state(cx, || current_user.username.clone());
     let user_id = current_user.id;
     let mut step = use_state(cx, || 0);
     let url = use_state(cx, || String::new());
@@ -1034,13 +1165,13 @@ fn AddLinkModal<'a>(cx: Scope, on_close: EventHandler<'a, ()>) -> Element<'a> {
         step += 1;
     };
     let on_save = move || {
-        to_owned![step, url, name];
+        to_owned![step, url, name, set_links];
 
         cx.spawn(async move {
-            let mut link = Link::new(url.get(), name.get());
-            link.user_id = user_id;
-            let _ = link.create().await;
-            step += 1;
+            // let _ = Link::insert(user_id, url.get(), name.get()).await;
+            // let links = Link::all_by_user_id(user_id).await;
+            // set_links(links);
+            // step += 1;
         });
     };
     if *step.get() == 3 {
@@ -1048,7 +1179,7 @@ fn AddLinkModal<'a>(cx: Scope, on_close: EventHandler<'a, ()>) -> Element<'a> {
         return None;
     }
     cx.render(rsx!(div {
-        class: "max-w-3xl w-3/4 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-6 bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-20",
+        class: "transition ease-out top-1/2 lg:top-0 left-0 right-0 bottom-0 fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
         {
             match *step.get() {
                 0 => rsx!(
@@ -1072,7 +1203,6 @@ fn AddLinkModal<'a>(cx: Scope, on_close: EventHandler<'a, ()>) -> Element<'a> {
                         }
                         TextField {
                             name: "username",
-                            autofocus: true,
                             value: "{username}",
                             oninput: move |event: Event<FormData>| {
                                 let val = event.value.clone();
@@ -1238,6 +1368,24 @@ fn Button<'a>(
     })
 }
 
+#[derive(Props)]
+struct RoundedRect<'a> {
+    onclick: EventHandler<'a, MouseEvent>,
+    children: Element<'a>,
+}
+
+fn RoundedRect<'a>(cx: Scope<'a, RoundedRect<'a>>) -> Element<'a> {
+    cx.render(
+        rsx! {
+            button {
+                class: "dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 rounded-md px-6 py-3 drop-shadow uppercase font-bold text-xl w-full",
+                onclick: move |event| cx.props.onclick.call(event),
+                &cx.props.children
+            }
+        }
+    )
+}
+
 #[inline_props]
 fn CircleButton<'a>(
     cx: Scope,
@@ -1270,6 +1418,37 @@ fn CircleButton<'a>(
 }
 
 #[inline_props]
+fn CircleButtonSmall<'a>(
+    cx: Scope,
+    onclick: EventHandler<'a, MouseEvent>,
+    disabled: Option<bool>,
+    children: Element<'a>,
+) -> Element<'a> {
+    let is_disabled = match disabled {
+        Some(true) => true,
+        Some(false) => false,
+        _ => false,
+    };
+    let disabled_str = match is_disabled {
+        true => "",
+        false => "false",
+    };
+    let on_click = move |event| {
+        if !is_disabled {
+            onclick.call(event)
+        }
+    };
+    cx.render(rsx! {
+        button {
+            class: "rounded-full bg-zinc-500 text-black w-6 h-6 disabled:opacity-50 flex justify-center items-center",
+            disabled: "{disabled_str}",
+            onclick: on_click,
+            &cx.props.children
+        }
+    })
+}
+
+#[inline_props]
 fn AddLinkButton<'a>(
     cx: Scope,
     onclick: EventHandler<'a, MouseEvent>,
@@ -1278,16 +1457,19 @@ fn AddLinkButton<'a>(
 ) -> Element<'a> {
     cx.render(rsx! {
         div {
-            class: "flex flex-col gap-2 items-center",
-            CircleButton {
-                onclick: move |event| { onclick.call(event) },
-                disabled: disabled.unwrap_or(false),
-                div {
-                    class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
-                    Icon { width: 40, height: 40, icon: BsPlus }
+            class: "flex flex-col gap-4 fixed md:absolute lg:absolute right-4 md:right-0 lg:right-0 bottom-20 md:bottom-0 lg:bottom-0",
+            div {
+                class: "flex flex-col gap-2 items-center",
+                CircleButton {
+                    onclick: move |event| { onclick.call(event) },
+                    disabled: disabled.unwrap_or(false),
+                    div {
+                        class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+                        Icon { width: 40, height: 40, icon: BsPlus }
+                    }
                 }
+                div { "Add" }
             }
-            div { "Add" }
         }
     })
 }
@@ -1315,6 +1497,89 @@ fn DeleteLinkButton<'a>(
     })
 }
 
+#[derive(Props)]
+struct MultilineTextInput<'a> {
+    #[props(optional)]
+    placeholder: Option<&'a str>,
+    #[props(optional)]
+    autofocus: Option<bool>,
+    value: String,
+    #[props(optional)]
+    onenter: Option<EventHandler<'a, KeyboardEvent>>,
+    #[props(optional)]
+    oninput: Option<EventHandler<'a, FormEvent>>,
+}
+
+fn MultilineTextInput<'a>(cx: Scope<'a, MultilineTextInput<'a>>) -> Element {
+    let placeholder = match cx.props.placeholder {
+        Some(p) => p,
+        None => "",
+    };
+    let autofocus = match cx.props.autofocus {
+        Some(af) => af,
+        None => false,
+    };
+    let value = &cx.props.value;
+    let oninput = move |event: FormEvent| {
+        if let Some(oninput) = &cx.props.oninput {
+            oninput.call(event);
+        }
+    };
+    let onkeypress = move |event: KeyboardEvent| {
+        match event.key() {
+            Key::Enter => {
+                if let Some(onenter) = &cx.props.onenter {
+                    onenter.call(event);
+                }
+            }
+            _ => (),
+        };
+    };
+    cx.render(rsx! {
+        textarea {
+            placeholder: placeholder,
+            class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
+            value: "{value}",
+            rows: 3,
+            autofocus: autofocus,
+            oninput: oninput,
+            onkeypress: onkeypress,
+        }
+    })
+}
+
+#[derive(Props)]
+struct TextInputProps<'a> {
+    #[props(optional)]
+    name: Option<&'a str>,
+    #[props(optional)]
+    value: Option<&'a str>,
+    #[props(optional)]
+    oninput: Option<EventHandler<'a, FormEvent>>
+}
+
+fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
+    let value = match &cx.props.value {
+        Some(v) => v,
+        None => "",
+    };
+    cx.render(
+        rsx! {
+            input {
+                r#type: "text",
+                name: "{cx.props.name:?}",
+                value: value,
+                class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
+                oninput: move |event| { 
+                    if let Some(oninput) = &cx.props.oninput {
+                        oninput.call(event);
+                    }
+                }
+            }            
+        }
+    )
+}
+
 #[inline_props]
 fn TextField<'a>(
     cx: Scope,
@@ -1325,6 +1590,7 @@ fn TextField<'a>(
     onblur: Option<EventHandler<'a, Event<FocusData>>>,
     onkeypress: Option<EventHandler<'a, KeyboardEvent>>,
     oninput: Option<EventHandler<'a, Event<FormData>>>,
+    onenter: Option<EventHandler<'a, Event<FormData>>>,
     placeholder: Option<&'a str>,
 ) -> Element<'a> {
     let autofocus_attr = if let Some(_) = *autofocus {
@@ -1346,6 +1612,11 @@ fn TextField<'a>(
                 placeholder: "{place_holder}",
                 class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
                 value: "{val}",
+                onsubmit: |event| {
+                    if let Some(oe) = onenter.as_ref() {
+                        oe.call(event);
+                    }
+                },
                 onkeypress: |event| {
                     if let Some(kp) = onkeypress.as_ref() {
                         kp.call(event);
@@ -1353,6 +1624,7 @@ fn TextField<'a>(
                 },
                 oninput: |event| {
                     if let Some(inp) = oninput.as_ref() {
+
                         inp.call(event);
                     }
                 },
@@ -1367,17 +1639,18 @@ fn TextField<'a>(
 }
 
 fn app(cx: Scope<AppProps>) -> Element {
+    use_init_atom_root(cx);
+    let set_user = use_set(cx, USER);
+    let set_links = use_set(cx, LINKS);
     let AppProps {
-        csrf_token,
         current_user,
+        links,
         ..
     } = cx.props;
-    use_shared_state_provider(cx, || AppState {
-        csrf_token: csrf_token.to_owned(),
-        current_user: Some(current_user.clone()),
-    });
+    set_user(current_user.clone());
+    set_links(links.clone());
     return cx.render(rsx! {
-        Profile { current_user: Some(current_user) }
+        Profile {}
     });
 }
 
@@ -1407,12 +1680,16 @@ async fn public_profile(
     } = user;
     let links = Link::all_by_user_id(id).await;
     let props = LayoutProps::from_depot(depot).await;
+    let bio = match bio {
+        Some(b) => b,
+        None => String::with_capacity(0),
+    };
     res.render(Text::Html(render_lazy(rsx! (
         Layout {
             csrf_token: props.csrf_token,
             current_user: props.current_user,
             div {
-                class: "flex flex-col max-w-3xl mx-auto gap-8 text-center items-center h-full relative w-full",
+                class: "flex flex-col max-w-3xl px-4 lg:px-0 mx-auto gap-8 text-center items-center h-full relative w-full",
                 {
                     match photo {
                         Some(p) => rsx! {
@@ -1430,12 +1707,19 @@ async fn public_profile(
                     "@{username}"
                 }
                 div {
-                    "{bio:?}"
+                    "{bio}"
                 }
                 LinkList {
                     links: links,
                     is_deleting: false,
                     on_delete: move |_| (),
+                }
+                div {
+                    class: "flex flex-col gap-4 fixed right-4 bottom-20",
+                    a {
+                        href: "/profile",
+                        "Edit"
+                    }
                 }
         }
     }))));
@@ -1491,6 +1775,7 @@ async fn connect(
         .to_string();
 
     if let Some(current_user) = maybe_user {
+        let links = Link::all_by_user_id(current_user.id).await;
         WebSocketUpgrade::new()
             .upgrade(req, res, |ws| async move {
                 _ = view
@@ -1500,6 +1785,7 @@ async fn connect(
                         AppProps {
                             csrf_token,
                             current_user,
+                            links,
                         },
                     )
                     .await
