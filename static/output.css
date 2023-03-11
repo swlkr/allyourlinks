@@ -561,10 +561,6 @@ video {
   top: 1rem;
 }
 
-.top-1\/2 {
-  top: 50%;
-}
-
 .bottom-20 {
   bottom: 5rem;
 }
@@ -795,11 +791,6 @@ video {
   line-height: 1.75rem;
 }
 
-.text-2xl {
-  font-size: 1.5rem;
-  line-height: 2rem;
-}
-
 .font-bold {
   font-weight: 700;
 }
@@ -952,10 +943,5 @@ video {
   .lg\:text-7xl {
     font-size: 4.5rem;
     line-height: 1;
-  }
-
-  .lg\:text-4xl {
-    font-size: 2.25rem;
-    line-height: 2.5rem;
   }
 }

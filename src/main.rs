@@ -1,6 +1,4 @@
 #![allow(non_snake_case)]
-#![allow(dead_code)]
-#![allow(unused_variables)]
 
 mod database;
 
@@ -33,7 +31,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, Level};
+use tracing::Level;
 
 pub const HOME: &str = "/";
 pub const LOGIN: &str = "/login";
@@ -126,8 +124,13 @@ fn routes() -> Router {
         .push(at("<**path>").get(static_embed::<Assets>()));
 }
 
-#[inline_props]
-fn Form<'a>(cx: Scope, action: &'a str, children: Element<'a>) -> Element<'a> {
+#[derive(Props)]
+struct FormProps<'a> {
+    action: &'a str,
+    children: Element<'a>
+}
+
+fn Form<'a>(cx: Scope<'a, FormProps<'a>>) -> Element {
     let app_state = use_shared_state::<AppState>(cx);
     let csrf_token = match app_state {
         Some(st) => st.read().csrf_token.clone(),
@@ -137,7 +140,7 @@ fn Form<'a>(cx: Scope, action: &'a str, children: Element<'a>) -> Element<'a> {
     cx.render(rsx! (
         form {
             method: "{method}",
-            action: "{action}",
+            action: "{cx.props.action}",
             input {
                 r#type: "hidden",
                 name: "csrf_token",
@@ -175,10 +178,6 @@ impl<'a> LayoutProps<'a> {
     pub async fn from_depot(depot: &mut Depot) -> LayoutProps {
         let addr = env::var("SERVER_ADDR").unwrap();
         let current_user = depot.obtain::<User>();
-        let user_id = match &current_user {
-            Some(u) => Some(u.id),
-            _ => None,
-        };
         let liveview_js = match &current_user {
             Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
                 "ws://{}/ws?username={}",
@@ -449,13 +448,6 @@ impl Link {
         .unwrap();
     }
 
-    async fn last() -> Option<Link> {
-        sqlx::query_as!(Link, "select id as 'id!', user_id as 'user_id!', url as 'url!', name, updated_at, created_at as 'created_at!' from links order by created_at asc limit 1")
-            .fetch_one(db())
-            .await
-            .ok()
-    }
-
     async fn delete(&self) -> Result<SqliteQueryResult, sqlx::Error> {
         sqlx::query!("delete from links where id = ?", self.id)
             .execute(db())
@@ -478,11 +470,6 @@ impl Link {
     }
 
     async fn create(&self) -> Result<SqliteQueryResult, sqlx::Error> {
-        let name = if let Some(n) = &self.name {
-            n.to_owned()
-        } else {
-            String::default()
-        };
         sqlx::query!(
             "insert into links (user_id, url, name) values (?, ?, ?)",
             self.user_id,
@@ -744,7 +731,7 @@ fn LinkComponent<'a>(
                         div {
                             class: "absolute -right-3 -top-3",
                             DeleteButton {
-                                onclick: move |event| on_delete.call(link)
+                                onclick: move |_| on_delete.call(link)
                             }
                         }
                     }
@@ -840,11 +827,10 @@ fn Profile(cx: Scope) -> Element {
     let loading = use_state(cx, || false);
     let url = use_state(cx, || String::default());
     let name= use_state(cx, || String::default());
+    let sheet_shown = use_state(cx, || false);
     let User {
         photo,
         username,
-        bio,
-        id,
         ..
     } = user;
     let on_delete = move |link: &Link| {
@@ -856,10 +842,13 @@ fn Profile(cx: Scope) -> Element {
         });
     };
     let on_add = move || {
-        to_owned![url, name, user, set_links];
+        to_owned![url, name, user, set_links, sheet_shown];
         cx.spawn(async move {
             let _ = Link::insert(user.id, url.get().as_ref(), Some(name.get().as_ref())).await;
             let links = Link::all_by_user_id(user.id).await;
+            sheet_shown.set(false);
+            url.set(String::new());
+            name.set(String::new());
             set_links(links);
         });
     };
@@ -869,7 +858,6 @@ fn Profile(cx: Scope) -> Element {
         let new_url = format!("{}{}", u, username);
         url.set(new_url);
     };
-    let sheet_shown = use_state(cx, || false);
     cx.render(rsx! {
         div {
             class: "flex flex-col max-w-3xl mx-auto gap-8 items-center h-full relative w-full sm:mb-24 mt-8 relative",
@@ -898,7 +886,7 @@ fn Profile(cx: Scope) -> Element {
             if *sheet_shown.get() == true {
                 rsx! {
                     Sheet {
-                        onclose: move |_| sheet_shown.set(false),
+                        onclose: move |_| { sheet_shown.set(false); name.set(String::new()); url.set(String::new()) },
                         div {
                             class: "flex flex-col gap-8",
                             div {
@@ -984,8 +972,12 @@ fn logout(depot: &mut Depot, res: &mut Response) {
     res.render(Redirect::other(HOME));
 }
 
-#[inline_props]
-fn Cta<'a>(cx: Scope, children: Element<'a>) -> Element<'a> {
+#[derive(Props)]
+struct CtaProps<'a> {
+    children: Element<'a>
+}
+
+fn Cta<'a>(cx: Scope<'a, CtaProps<'a>>) -> Element {
     cx.render(
         rsx! {
             button {
@@ -1128,7 +1120,7 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
                 div {
                     class: "absolute right-4 top-4",
                     CircleButtonSmall {
-                        onclick: move |event| translate_y.set("translate-y-full"),
+                        onclick: move |_| translate_y.set("translate-y-full"),
                         disabled: false,
                         Icon {
                             width: 24,
@@ -1140,117 +1132,6 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
             }          
         }
     );
-}
-
-#[inline_props]
-fn AddLinkModal<'a>(cx: Scope, on_close: EventHandler<'a, ()>) -> Element<'a> {
-    let current_user: &User = use_read(cx, USER);
-    let set_links = use_set(cx, LINKS);
-    let username = use_state(cx, || current_user.username.clone());
-    let user_id = current_user.id;
-    let mut step = use_state(cx, || 0);
-    let url = use_state(cx, || String::new());
-    let name = use_state(cx, || String::new());
-    let on_icon_click = move |icon: Icon| {
-        to_owned![step, url];
-        let new_url = Link::url_from_icon(icon);
-        url.set(new_url);
-        step += 1;
-    };
-    let mut on_enter = move || step += 1;
-    let on_escape = move || {};
-    let mut on_next = move || {
-        name.set(format!("{}{}", url, username));
-        url.set(format!("{}{}", url, username));
-        step += 1;
-    };
-    let on_save = move || {
-        to_owned![step, url, name, set_links];
-
-        cx.spawn(async move {
-            // let _ = Link::insert(user_id, url.get(), name.get()).await;
-            // let links = Link::all_by_user_id(user_id).await;
-            // set_links(links);
-            // step += 1;
-        });
-    };
-    if *step.get() == 3 {
-        cx.props.on_close.call(());
-        return None;
-    }
-    cx.render(rsx!(div {
-        class: "transition ease-out top-1/2 lg:top-0 left-0 right-0 bottom-0 fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
-        {
-            match *step.get() {
-                0 => rsx!(
-                    div {
-                        class: "flex flex-col gap-4",
-                        h1 {
-                            class: "text-2xl lg:text-4xl text-center",
-                            "Add a link"
-                        }
-                        IconList {
-                            onclick: move |icon| on_icon_click(icon)
-                        }
-                    }
-                ),
-                1 => rsx!(
-                    div {
-                        class: "flex flex-col gap-4",
-                        h1 {
-                            class: "text-2xl lg:text-4xl text-center",
-                            "Enter username"
-                        }
-                        TextField {
-                            name: "username",
-                            value: "{username}",
-                            oninput: move |event: Event<FormData>| {
-                                let val = event.value.clone();
-                                username.set(val);
-                            },
-                            onkeypress: move |event: Event<KeyboardData>| {
-                                match event.code() {
-                                    Code::Enter => {
-                                        on_enter();
-                                    },
-                                    Code::Escape => {
-                                        on_escape();
-                                    },
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Button {
-                            onclick: move |_| on_next(),
-                            "Next"
-                        }
-                    }
-                ),
-                2 => rsx!(
-                    div {
-                        class: "flex flex-col gap-4",
-                        h1 {
-                            class: "text-2xl lg:text-4xl text-center",
-                            "Change link name"
-                        }
-                        TextField {
-                            name: "name",
-                            value: "{name}",
-                            oninput: move |event: Event<FormData>| {
-                                let val = event.value.clone();
-                                name.set(val);
-                            }
-                        }
-                        Button {
-                            onclick: move |_| on_save(),
-                            "Save"
-                        }
-                    }
-                ),
-                _ => rsx!(div{})
-            }
-        }
-    }))
 }
 
 #[derive(Props, PartialEq)]
@@ -1470,29 +1351,6 @@ fn AddLinkButton<'a>(
                 }
                 div { "Add" }
             }
-        }
-    })
-}
-
-#[inline_props]
-fn DeleteLinkButton<'a>(
-    cx: Scope,
-    onclick: EventHandler<'a, MouseEvent>,
-    disabled: Option<bool>,
-    children: Element<'a>,
-) -> Element<'a> {
-    cx.render(rsx! {
-        div {
-            class: "flex flex-col gap-2 items-center",
-            CircleButton {
-                onclick: move |event| { onclick.call(event) },
-                disabled: disabled.unwrap_or(false),
-                div {
-                    class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
-                    Icon { width: 40, height: 40, icon: BsX }
-                }
-            }
-            div { "Delete" }
         }
     })
 }
@@ -1761,13 +1619,6 @@ async fn connect(
     }
     let view = depot.obtain::<Arc<LiveViewPool>>().unwrap().clone();
     let maybe_user = depot.obtain::<User>().cloned();
-    let liveview_js = match &maybe_user {
-        Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
-            "ws://{}/ws?username={}",
-            addr, username
-        ))),
-        _ => None,
-    };
     let csrf_token = depot
         .csrf_token()
         .map(|s| &**s)
