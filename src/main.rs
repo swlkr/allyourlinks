@@ -127,7 +127,7 @@ fn routes() -> Router {
 #[derive(Props)]
 struct FormProps<'a> {
     action: &'a str,
-    children: Element<'a>
+    children: Element<'a>,
 }
 
 fn Form<'a>(cx: Scope<'a, FormProps<'a>>) -> Element {
@@ -826,12 +826,10 @@ fn Profile(cx: Scope) -> Element {
     let set_links = use_set(cx, LINKS);
     let loading = use_state(cx, || false);
     let url = use_state(cx, || String::default());
-    let name= use_state(cx, || String::default());
+    let name = use_state(cx, || String::default());
     let sheet_shown = use_state(cx, || false);
     let User {
-        photo,
-        username,
-        ..
+        photo, username, ..
     } = user;
     let on_delete = move |link: &Link| {
         to_owned![link, set_links, user];
@@ -843,14 +841,18 @@ fn Profile(cx: Scope) -> Element {
     };
     let on_add = move || {
         to_owned![url, name, user, set_links, sheet_shown];
-        cx.spawn(async move {
-            let _ = Link::insert(user.id, url.get().as_ref(), Some(name.get().as_ref())).await;
-            let links = Link::all_by_user_id(user.id).await;
+        if url.get().is_empty() {
             sheet_shown.set(false);
-            url.set(String::new());
-            name.set(String::new());
-            set_links(links);
-        });
+        } else {
+            cx.spawn(async move {
+                let _ = Link::insert(user.id, url.get().as_ref(), Some(name.get().as_ref())).await;
+                let links = Link::all_by_user_id(user.id).await;
+                sheet_shown.set(false);
+                url.set(String::new());
+                name.set(String::new());
+                set_links(links);
+            });
+        }
     };
     let on_icon_click = move |icon| {
         to_owned![url];
@@ -974,7 +976,7 @@ fn logout(depot: &mut Depot, res: &mut Response) {
 
 #[derive(Props)]
 struct CtaProps<'a> {
-    children: Element<'a>
+    children: Element<'a>,
 }
 
 fn Cta<'a>(cx: Scope<'a, CtaProps<'a>>) -> Element {
@@ -1094,28 +1096,20 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
             sleep(duration).await;
             match *shown.current() {
                 true => translate_y.set("translate-y-0"),
-                false => translate_y.set("translate-y-full")
+                false => translate_y.set("translate-y-full"),
             };
         }
     });
-    let _ = use_future(cx, (translate_y,), |_| {
-        to_owned![translate_y, shown];
-        async move {
-            let duration = Duration::from_millis(150);
-            sleep(duration).await;
-            if translate_y.current().to_string() == "translate-y-full" {
-                shown.set(false);
-            }
-        }
-    });
-    if *shown.get() == false {
-        cx.props.onclose.call(());
-        return None;
-    }
     return cx.render(
         rsx! {
             div {
                 class: "transition ease-out top-1/3 overflow-y-auto lg:top-0 {translate_y} left-0 right-0 bottom-0 fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
+                ontransitionend: move |_| {
+                    to_owned![translate_y];
+                    if *translate_y == "translate-y-full" {
+                        cx.props.onclose.call(())
+                    }
+                },
                 &cx.props.children,
                 div {
                     class: "absolute right-4 top-4",
@@ -1129,7 +1123,7 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
                         }
                     }
                 }
-            }          
+            }
         }
     );
 }
@@ -1413,7 +1407,7 @@ struct TextInputProps<'a> {
     #[props(optional)]
     value: Option<&'a str>,
     #[props(optional)]
-    oninput: Option<EventHandler<'a, FormEvent>>
+    oninput: Option<EventHandler<'a, FormEvent>>,
 }
 
 fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
@@ -1428,12 +1422,12 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
                 name: "{cx.props.name:?}",
                 value: value,
                 class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
-                oninput: move |event| { 
+                oninput: move |event| {
                     if let Some(oninput) = &cx.props.oninput {
                         oninput.call(event);
                     }
                 }
-            }            
+            }
         }
     )
 }
