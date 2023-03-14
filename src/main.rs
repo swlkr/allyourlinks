@@ -4,7 +4,6 @@ mod database;
 
 use anyhow::Result;
 use database::db;
-use dioxus::html::input_data::keyboard_types::Code;
 use dioxus::prelude::*;
 use dioxus_elements::input_data::keyboard_types::Key;
 use dioxus_free_icons::icons::bs_icons::*;
@@ -25,6 +24,7 @@ use salvo::session::SessionDepotExt;
 use salvo::session::SessionHandler;
 use serde::Deserialize;
 use sqlx::sqlite::SqliteQueryResult;
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::env;
 use std::net::SocketAddr;
@@ -41,6 +41,7 @@ pub const PUBLIC_PROFILE: &str = "/@<username>";
 
 static USER: Atom<User> = |_| User::default();
 static LINKS: Atom<Vec<Link>> = |_| vec![];
+static SELECTED_LINK_IDS: Atom<HashSet<i64>> = |_| HashSet::new();
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -219,7 +220,7 @@ fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element<'a> {
                     // style { "#main {{ height: calc(100vh - 88px); }}" }
                 }
                 body {
-                    class: "dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto mb-[100px]",
+                    class: "dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto mb-[150px]",
                     Nav { user: cx.props.current_user }
                     &cx.props.children
                     "{liveview_js}"
@@ -437,6 +438,18 @@ struct Link {
 }
 
 impl Link {
+    async fn delete_by_ids(ids: Vec<i64>) -> Result<SqliteQueryResult, sqlx::Error> {
+        let sql = format!(
+            "delete from links where id in ({})",
+            (0..ids.len()).map(|_| "?").collect::<Vec<&str>>().join(",")
+        );
+        let mut q = sqlx::query(&sql);
+        for id in ids {
+            q = q.bind(id);
+        }
+        return q.execute(db()).await;
+    }
+
     async fn all_by_user_id(user_id: i64) -> Vec<Link> {
         return sqlx::query_as!(
             Link,
@@ -448,16 +461,10 @@ impl Link {
         .unwrap();
     }
 
-    async fn delete(&self) -> Result<SqliteQueryResult, sqlx::Error> {
-        sqlx::query!("delete from links where id = ?", self.id)
-            .execute(db())
-            .await
-    }
-
     async fn insert<'a>(
         user_id: i64,
         url: &'a str,
-        name: Option<&'a str>,
+        name: Option<String>,
     ) -> Result<SqliteQueryResult, sqlx::Error> {
         sqlx::query!(
             "insert into links (user_id, url, name) values (?, ?, ?)",
@@ -480,39 +487,14 @@ impl Link {
         .await
     }
 
-    async fn find_by_id(id: i64) -> Option<Link> {
-        sqlx::query_as!(Link, "select * from links where id = ?", id,)
-            .fetch_one(db())
-            .await
-            .ok()
-    }
-
-    async fn update(&self) -> Result<Link, sqlx::Error> {
+    async fn update(id: i64, url: String, name: Option<String>) -> Result<Link, sqlx::Error> {
         sqlx::query_as!(
             Link,
             "update links set name = ?, url = ?, updated_at = unixepoch() where id = ? returning id as 'id!', user_id as 'user_id!', url as 'url!', name, updated_at, created_at as 'created_at!'",
-            self.name,
-            self.url,
-            self.id
+            name,
+            url,
+            id
         ).fetch_one(db()).await
-    }
-
-    fn parse_name(name_and_url: &String) -> Option<String> {
-        let start = name_and_url.find('[');
-        let end = name_and_url.find(']');
-        match (start, end) {
-            (Some(first), Some(last)) => Some((&name_and_url)[(first + 1)..last].to_owned()),
-            _ => None,
-        }
-    }
-
-    fn parse_url(name_and_url: &String) -> String {
-        let start = name_and_url.find('(');
-        let end = name_and_url.find(')');
-        match (start, end) {
-            (Some(first), Some(last)) => (&name_and_url)[(first + 1)..last].to_owned(),
-            _ => String::default(),
-        }
     }
 
     fn new(url: &str, name: &str) -> Self {
@@ -628,160 +610,105 @@ fn LinkIconComponent<'a>(cx: Scope, link: &'a Link) -> Element<'a> {
     })
 }
 
-#[inline_props]
-fn LinkComponent<'a>(
-    cx: Scope,
-    link: Link,
-    is_deleting: &'a bool,
-    on_delete: EventHandler<'a, &'a Link>,
-) -> Element {
-    let link_name = match &link.name {
-        Some(n) => n,
-        None => &link.url,
-    };
-    let name_and_url = use_state(cx, || format!("[{}]({})", link_name, link.url));
-    let is_editing = use_state(cx, || false);
-    let edit_clicked = move || {
-        is_editing.set(true);
-    };
-    let link_state = use_state(cx, || link.clone());
-    let id = link.id;
-    let on_enter = move || {
-        to_owned![name_and_url, is_editing, link_state];
-        cx.spawn(async move {
-            if let Some(mut l) = Link::find_by_id(id).await {
-                l.name = Link::parse_name(name_and_url.get());
-                l.url = Link::parse_url(name_and_url.get());
-                match l.update().await {
-                    Ok(link) => {
-                        link_state.set(link);
-                        is_editing.set(false);
-                    }
-                    _ => (),
-                }
-            }
-        });
-    };
-    let on_escape = move || {
-        is_editing.set(false);
-    };
-    let url = &link_state.get().url;
-    let name = &link_state.get().name;
-    cx.render(if *is_editing.get() {
-        rsx! {
-            div {
-                class: "flex gap-4",
-                LinkIconComponent {
-                    link: link
-                },
-                TextField {
-                    name: "name_and_url",
-                    autofocus: true,
-                    value: "{name_and_url}",
-                    oninput: move |event: Event<FormData>| {
-                        let val = event.value.clone();
-                        name_and_url.set(val);
-                    },
-                    onblur: move |_: Event<FocusData>| {
-                        is_editing.set(false);
-                    },
-                    onkeypress: move |event: Event<KeyboardData>| {
-                        match event.code() {
-                            Code::Enter => {
-                                on_enter();
-                            },
-                            Code::Escape => {
-                                on_escape();
-                            },
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        rsx! {
-            div {
-                class: "relative",
-                div {
-                    class: "flex gap-4 items-center",
-                    LinkIconComponent {
-                        link: link
-                    }
-                    a {
-                        class: "px-2 py-3 dark:bg-yellow-400 dark:text-zinc-900 rounded-md",
-                        href: "{url}",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            edit_clicked()
-                        },
-                        if let Some(n) = name {
-                            rsx! {
-                                "{n}"
-                            }
-                        } else {
-                            rsx! {
-                                "{url}"
-                            }
-                        }
-                    }
-                }
-                if **is_deleting {
-                    rsx! {
-                        div {
-                            class: "absolute -right-3 -top-3",
-                            DeleteButton {
-                                onclick: move |_| on_delete.call(link)
-                            }
-                        }
-                    }
-                }
+#[derive(Props)]
+struct DeleteLinkProps<'a> {
+    ondelete: EventHandler<'a>,
+}
+
+fn DeleteLink<'a>(cx: Scope<'a, DeleteLinkProps<'a>>) -> Element {
+    cx.render(rsx! {
+        div {
+            class: "flex gap-12 pt-8",
+            RoundedRect {
+                onclick: move |_| cx.props.ondelete.call(()),
+                "You sure, bro?"
             }
         }
     })
 }
 
-#[inline_props]
-fn DeleteButton<'a>(cx: Scope, onclick: EventHandler<'a, MouseEvent>) -> Element<'a> {
-    cx.render(rsx!(CircleButtonSmall {
-        onclick: move |event| onclick.call(event),
-        disabled: false,
-        // div {
-        //     class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-2",
-            Icon {
-                width: 24,
-                height: 24,
-                icon: BsDash
-            }
-        // }
-    }))
+#[derive(Props)]
+struct SelectButtonProps<'a> {
+    onclick: EventHandler<'a, MouseEvent>,
 }
 
-#[inline_props]
-fn LinkList<'a>(
-    cx: Scope,
-    links: Option<Vec<Link>>,
-    is_deleting: bool,
-    on_delete: EventHandler<'a, &'a Link>,
-) -> Element {
-    if links.is_none() {
-        return None;
-    }
-    cx.render(rsx!(
+fn SelectButton<'a>(cx: Scope<'a, SelectButtonProps<'a>>) -> Element {
+    let selected = use_state(cx, || false);
+    let selected_class = match **selected {
+        true => "dark:bg-yellow-400 bg-zinc-900",
+        false => "bg-transparent",
+    };
+    cx.render(rsx! {
+        CircleButtonSmall {
+            onclick: move |event| { cx.props.onclick.call(event); selected.set(!selected) },
+            disabled: false,
+            div {
+                class: "transition ease-out rounded-full w-3/4 h-3/4 {selected_class}"
+            }
+        }
+    })
+}
+
+#[derive(Props)]
+struct ShowLinkProps<'a> {
+    link: &'a Link,
+}
+
+fn ShowLink<'a>(cx: Scope<'a, ShowLinkProps<'a>>) -> Element {
+    let selected_links: &HashSet<i64> = use_read(cx, SELECTED_LINK_IDS);
+    let set_selected_links = use_set(cx, SELECTED_LINK_IDS);
+    let link = cx.props.link;
+    let display = match &link.name {
+        Some(n) => n,
+        None => &link.url,
+    };
+    let on_select = move |_| {
+        to_owned![selected_links, set_selected_links];
+        let mut new_links: HashSet<i64> = selected_links;
+        if new_links.contains(&link.id) {
+            new_links.remove(&link.id);
+        } else {
+            new_links.insert(link.id);
+        }
+        set_selected_links(new_links);
+    };
+    cx.render(
+        rsx! {
+            div {
+                class: "flex gap-4 border-t dark:border-zinc-700 border-zinc-300 p-4 pt-4 w-full items-center",
+                SelectButton {
+                    onclick: on_select
+                }
+                LinkIconComponent {
+                    link: link
+                }
+                a {
+                    class: "grow",
+                    "{display}"
+                }
+            }
+        }
+    )
+}
+
+#[derive(Props, PartialEq)]
+struct LinkListProps {
+    links: Vec<Link>,
+}
+
+fn LinkList<'a>(cx: Scope<'a, LinkListProps>) -> Element {
+    cx.render(rsx! {
         div {
-            class: "flex flex-col gap-8 items-start h-full",
-            links.clone().unwrap().into_iter().map(|link| {
+            cx.props.links.iter().map(|link| {
                 rsx! {
-                   LinkComponent {
+                    ShowLink {
                         key: "{link.id}",
                         link: link,
-                        is_deleting: is_deleting,
-                        on_delete: move |link| on_delete.call(link)
-                   }
+                    }
                 }
             })
         }
-    ))
+    })
 }
 
 fn Bio(cx: Scope) -> Element {
@@ -820,49 +747,119 @@ fn Bio(cx: Scope) -> Element {
     })
 }
 
-fn Profile(cx: Scope) -> Element {
+#[derive(Props)]
+struct AddEditLinkProps<'a> {
+    onsave: EventHandler<'a, (Option<i64>, String, Option<String>)>,
+    #[props(!optional)]
+    link: Option<&'a Link>,
+}
+
+fn AddEditLink<'a>(cx: Scope<'a, AddEditLinkProps<'a>>) -> Element {
+    let (id, url, name) = match cx.props.link {
+        Some(link) => (Some(link.id), link.url.clone(), link.name.clone()),
+        None => (None, String::default(), None),
+    };
+    let url = use_state(cx, || url);
+    let name = use_state(cx, || name);
     let user = use_read(cx, USER);
-    let links = use_read(cx, LINKS);
-    let set_links = use_set(cx, LINKS);
-    let loading = use_state(cx, || false);
-    let url = use_state(cx, || String::default());
-    let name = use_state(cx, || String::default());
-    let sheet_shown = use_state(cx, || false);
-    let User {
-        photo, username, ..
-    } = user;
-    let on_delete = move |link: &Link| {
-        to_owned![link, set_links, user];
-        cx.spawn(async move {
-            let _ = link.delete().await;
-            let links = Link::all_by_user_id(user.id).await;
-            set_links(links);
-        });
-    };
-    let on_add = move || {
-        to_owned![url, name, user, set_links, sheet_shown];
-        if url.get().is_empty() {
-            sheet_shown.set(false);
-        } else {
-            cx.spawn(async move {
-                let _ = Link::insert(user.id, url.get().as_ref(), Some(name.get().as_ref())).await;
-                let links = Link::all_by_user_id(user.id).await;
-                sheet_shown.set(false);
-                url.set(String::new());
-                name.set(String::new());
-                set_links(links);
-            });
-        }
-    };
     let on_icon_click = move |icon| {
-        to_owned![url];
+        to_owned![url, user];
         let u = Link::url_from_icon(icon);
-        let new_url = format!("{}{}", u, username);
+        let new_url = format!("{}{}", u, user.username);
         url.set(new_url);
     };
     cx.render(rsx! {
         div {
-            class: "flex flex-col max-w-3xl mx-auto gap-8 items-center h-full relative w-full sm:mb-24 mt-8 relative",
+            div {
+                class: "flex flex-col gap-8",
+                div {
+                    class: "flex flex-col gap-2",
+                    div { class: "font-bold", "select a link" }
+                    IconList {
+                        onclick: on_icon_click
+                    }
+                }
+                div {
+                    class: "flex flex-col gap-2",
+                    label { r#for: "url", class: "font-bold", "change the url" }
+                    TextInput {
+                        value: url.get(),
+                        oninput: move |event: FormEvent| url.set(event.value.clone()),
+                        name: "url"
+                    }
+                }
+                div {
+                    class: "flex flex-col gap-2",
+                    label { r#for: "name", class: "font-bold", "add a name instead of url" }
+                    TextInput {
+                        name: "name",
+                        value: name.get().as_ref().map_or("", String::as_str),
+                        oninput: move |event: FormEvent| name.set(Some(event.value.clone())),
+                    }
+                }
+                RoundedRect {
+                    onclick: move |_| cx.props.onsave.call((id, url.get().clone(), name.get().clone())),
+                    "Save link"
+                }
+            }
+        }
+    })
+}
+
+#[derive(PartialEq)]
+enum ProfileAction {
+    Add,
+    Delete,
+    Edit,
+    None,
+}
+
+fn Profile(cx: Scope) -> Element {
+    let user = use_read(cx, USER);
+    let links: &Vec<Link> = use_read(cx, LINKS);
+    let set_links = use_set(cx, LINKS);
+    let selected_link_ids: &HashSet<i64> = use_read(cx, SELECTED_LINK_IDS);
+    let action = use_state(cx, || ProfileAction::None);
+    let User {
+        photo, username, ..
+    } = user;
+    let onsave = move |(id, url, name): (Option<i64>, String, Option<String>)| {
+        to_owned![user, set_links, action];
+        if url.is_empty() {
+            todo!("Show an error or something that url needs to be filled in");
+            // action.set(ProfileAction::None);
+        } else {
+            cx.spawn(async move {
+                if let Some(id) = id {
+                    let _ = Link::update(id, url, name).await;
+                } else {
+                    let _ = Link::insert(user.id, &url, name).await;
+                }
+                let links = Link::all_by_user_id(user.id).await;
+                set_links(links);
+                action.set(ProfileAction::None);
+            });
+        }
+    };
+    let ondelete = move |_| {
+        to_owned![set_links, user, selected_link_ids, action];
+        cx.spawn(async move {
+            let ids: Vec<i64> = selected_link_ids.into_iter().collect();
+            let _ = Link::delete_by_ids(ids).await;
+            let links = Link::all_by_user_id(user.id).await;
+            action.set(ProfileAction::None);
+            set_links(links);
+        });
+    };
+    let id = selected_link_ids.iter().map(|x| *x).last();
+    let link = if let Some(id) = id {
+        links.iter().find(|l| l.id == id)
+    } else {
+        None
+    };
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col max-w-3xl mx-auto gap-8 items-center h-full relative w-full mt-8 relative",
             {
                 match photo {
                     Some(p) => rsx! {
@@ -881,54 +878,46 @@ fn Profile(cx: Scope) -> Element {
             }
             Bio {}
             LinkList {
-                links: links.to_vec(),
-                is_deleting: true,
-                on_delete: move |link| { loading.set(true); on_delete(link); },
+                links: links.to_vec()
             }
-            if *sheet_shown.get() == true {
+            if **action != ProfileAction::None {
                 rsx! {
                     Sheet {
-                        onclose: move |_| { sheet_shown.set(false); name.set(String::new()); url.set(String::new()) },
-                        div {
-                            class: "flex flex-col gap-8",
-                            div {
-                                class: "flex flex-col gap-2",
-                                div { class: "font-bold", "select a link" }
-                                IconList {
-                                    onclick: on_icon_click
-                                }
-                            }
-                            div {
-                                class: "flex flex-col gap-2",
-                                label { r#for: "url", class: "font-bold", "change the url" }
-                                TextInput {
-                                    value: url.get(),
-                                    oninput: move |event: FormEvent| url.set(event.value.clone()),
-                                    name: "url"
-                                }
-                            }
-                            div {
-                                class: "flex flex-col gap-2",
-                                label { r#for: "name", class: "font-bold", "add a name instead of url" }
-                                TextInput {
-                                    name: "name",
-                                    value: name.get()
-                                    oninput: move |event: FormEvent| name.set(event.value.clone()),
-                                }
-                            }
-                            RoundedRect {
-                                onclick: move |_| {
-                                    loading.set(true);
-                                    on_add();
-                                },
-                                "Add new link"
-                            }
+                        onclose: move |_| action.set(ProfileAction::None),
+                        match **action {
+                            ProfileAction::Add => rsx! { AddEditLink {
+                                onsave: onsave,
+                                link: None
+                            } },
+                            ProfileAction::Delete => rsx! { DeleteLink {
+                                ondelete: ondelete
+                            } },
+                            ProfileAction::Edit => rsx! { AddEditLink {
+                                onsave: onsave,
+                                link: link,
+                            } },
+                            ProfileAction::None => rsx! { () },
                         }
                     }
                 }
             }
-            AddLinkButton {
-                onclick: move |_| sheet_shown.set(true),
+            div {
+                class: "flex flex-col gap-4 fixed md:absolute lg:absolute right-4 md:right-0 lg:right-0 bottom-20 md:bottom-0 lg:bottom-0",
+                DeleteLinkButton {
+                    onclick: move |_| {
+                        if *action.get() == ProfileAction::Delete {
+                            action.set(ProfileAction::None);
+                        } else {
+                            action.set(ProfileAction::Delete);
+                        }
+                    },
+                }
+                EditLinkButton {
+                    onclick: move |_| action.set(ProfileAction::Edit),
+                }
+                AddLinkButton {
+                    onclick: move |_| action.set(ProfileAction::Add),
+                }
             }
         }
     })
@@ -1092,7 +1081,7 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
     let _ = use_future(cx, (), |_| {
         to_owned![translate_y, shown];
         async move {
-            let duration = Duration::from_millis(0);
+            let duration = Duration::from_millis(10);
             sleep(duration).await;
             match *shown.current() {
                 true => translate_y.set("translate-y-0"),
@@ -1103,7 +1092,7 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
     return cx.render(
         rsx! {
             div {
-                class: "transition ease-out top-1/3 overflow-y-auto lg:top-0 {translate_y} left-0 right-0 bottom-0 fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
+                class: "transition ease-out overflow-y-auto h-fit lg:top-1/3 {translate_y} left-0 right-0 bottom-0 fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
                 ontransitionend: move |_| {
                     to_owned![translate_y];
                     if *translate_y == "translate-y-full" {
@@ -1332,19 +1321,62 @@ fn AddLinkButton<'a>(
 ) -> Element<'a> {
     cx.render(rsx! {
         div {
-            class: "flex flex-col gap-4 fixed md:absolute lg:absolute right-4 md:right-0 lg:right-0 bottom-20 md:bottom-0 lg:bottom-0",
-            div {
-                class: "flex flex-col gap-2 items-center",
-                CircleButton {
-                    onclick: move |event| { onclick.call(event) },
-                    disabled: disabled.unwrap_or(false),
-                    div {
-                        class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
-                        Icon { width: 40, height: 40, icon: BsPlus }
-                    }
+            class: "flex flex-col gap-2 items-center",
+            CircleButton {
+                onclick: move |event| { onclick.call(event) },
+                disabled: disabled.unwrap_or(false),
+                div {
+                    class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+                    Icon { width: 40, height: 40, icon: BsPlus }
                 }
-                div { "Add" }
             }
+            div { "Add" }
+        }
+    })
+}
+
+#[inline_props]
+fn EditLinkButton<'a>(
+    cx: Scope,
+    onclick: EventHandler<'a, MouseEvent>,
+    disabled: Option<bool>,
+    children: Element<'a>,
+) -> Element<'a> {
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col gap-2 items-center",
+            CircleButton {
+                onclick: move |event| { onclick.call(event) },
+                disabled: disabled.unwrap_or(false),
+                div {
+                    class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+                    Icon { width: 40, height: 40, icon: BsPencil }
+                }
+            }
+            div { "Edit" }
+        }
+    })
+}
+
+#[inline_props]
+fn DeleteLinkButton<'a>(
+    cx: Scope,
+    onclick: EventHandler<'a, MouseEvent>,
+    disabled: Option<bool>,
+    children: Element<'a>,
+) -> Element<'a> {
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col gap-2 items-center",
+            CircleButton {
+                onclick: move |event| { onclick.call(event) },
+                disabled: disabled.unwrap_or(false),
+                div {
+                    class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -my-3",
+                    Icon { width: 40, height: 40, icon: BsDash }
+                }
+            }
+            div { "Delete" }
         }
     })
 }
@@ -1562,9 +1594,7 @@ async fn public_profile(
                     "{bio}"
                 }
                 LinkList {
-                    links: links,
-                    is_deleting: false,
-                    on_delete: move |_| (),
+                    links: links
                 }
                 div {
                     class: "flex flex-col gap-4 fixed right-4 bottom-20",
