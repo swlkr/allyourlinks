@@ -40,7 +40,6 @@ pub const PROFILE: &str = "/profile";
 pub const PUBLIC_PROFILE: &str = "/@<username>";
 
 static USER: Atom<User> = |_| User::default();
-static LINKS: Atom<Vec<Link>> = |_| vec![];
 static SELECTED_LINK_IDS: Atom<HashSet<i64>> = |_| HashSet::new();
 
 #[derive(RustEmbed)]
@@ -616,12 +615,18 @@ struct DeleteLinkProps<'a> {
 }
 
 fn DeleteLink<'a>(cx: Scope<'a, DeleteLinkProps<'a>>) -> Element {
+    let selected_link_ids: &HashSet<i64> = use_read(cx, SELECTED_LINK_IDS);
+    let num_to_delete = selected_link_ids.len();
+    let s = match num_to_delete {
+        1 => "link",
+        _ => "links",
+    };
     cx.render(rsx! {
         div {
             class: "flex gap-12 pt-8",
             RoundedRect {
                 onclick: move |_| cx.props.ondelete.call(()),
-                "You sure, bro?"
+                "Delete ({num_to_delete}) {s}?"
             }
         }
     })
@@ -814,17 +819,22 @@ enum ProfileAction {
     None,
 }
 
-fn Profile(cx: Scope) -> Element {
-    let user = use_read(cx, USER);
-    let links: &Vec<Link> = use_read(cx, LINKS);
-    let set_links = use_set(cx, LINKS);
+#[derive(Props, PartialEq)]
+struct ProfileProps<'a> {
+    user: &'a User,
+    links: Vec<Link>,
+}
+
+fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
+    let user = cx.props.user;
+    let links = use_state(cx, || cx.props.links.clone());
     let selected_link_ids: &HashSet<i64> = use_read(cx, SELECTED_LINK_IDS);
     let action = use_state(cx, || ProfileAction::None);
     let User {
         photo, username, ..
     } = user;
     let onsave = move |(id, url, name): (Option<i64>, String, Option<String>)| {
-        to_owned![user, set_links, action];
+        to_owned![user, links, action];
         if url.is_empty() {
             todo!("Show an error or something that url needs to be filled in");
             // action.set(ProfileAction::None);
@@ -835,27 +845,30 @@ fn Profile(cx: Scope) -> Element {
                 } else {
                     let _ = Link::insert(user.id, &url, name).await;
                 }
-                let links = Link::all_by_user_id(user.id).await;
-                set_links(links);
+                let new_links = Link::all_by_user_id(user.id).await;
+                links.set(new_links);
                 action.set(ProfileAction::None);
             });
         }
-    };
-    let ondelete = move |_| {
-        to_owned![set_links, user, selected_link_ids, action];
-        cx.spawn(async move {
-            let ids: Vec<i64> = selected_link_ids.into_iter().collect();
-            let _ = Link::delete_by_ids(ids).await;
-            let links = Link::all_by_user_id(user.id).await;
-            action.set(ProfileAction::None);
-            set_links(links);
-        });
     };
     let id = selected_link_ids.iter().map(|x| *x).last();
     let link = if let Some(id) = id {
         links.iter().find(|l| l.id == id)
     } else {
         None
+    };
+    let ondelete = move |_| {
+        if selected_link_ids.is_empty() {
+            return;
+        }
+        to_owned![links, user, selected_link_ids, action];
+        cx.spawn(async move {
+            let ids: Vec<i64> = selected_link_ids.into_iter().collect();
+            let _ = Link::delete_by_ids(ids).await;
+            let new_links = Link::all_by_user_id(user.id).await;
+            links.set(new_links);
+            action.set(ProfileAction::None);
+        });
     };
     cx.render(rsx! {
         div {
@@ -1081,7 +1094,7 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
     let _ = use_future(cx, (), |_| {
         to_owned![translate_y, shown];
         async move {
-            let duration = Duration::from_millis(10);
+            let duration = Duration::from_millis(5);
             sleep(duration).await;
             match *shown.current() {
                 true => translate_y.set("translate-y-0"),
@@ -1092,7 +1105,7 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
     return cx.render(
         rsx! {
             div {
-                class: "transition ease-out overflow-y-auto h-fit lg:top-1/3 {translate_y} left-0 right-0 bottom-0 fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
+                class: "transition ease-out overflow-y-auto h-fit {translate_y} left-0 right-0 bottom-0 lg:max-w-3xl lg:mx-auto fixed p-6 rounded-md bg-yellow-400 text-zinc-900 dark:bg-zinc-800 dark:text-yellow-400 z-10",
                 ontransitionend: move |_| {
                     to_owned![translate_y];
                     if *translate_y == "translate-y-full" {
@@ -1524,17 +1537,18 @@ fn TextField<'a>(
 
 fn app(cx: Scope<AppProps>) -> Element {
     use_init_atom_root(cx);
-    let set_user = use_set(cx, USER);
-    let set_links = use_set(cx, LINKS);
     let AppProps {
         current_user,
         links,
         ..
     } = cx.props;
+    let set_user = use_set(cx, USER);
     set_user(current_user.clone());
-    set_links(links.clone());
     return cx.render(rsx! {
-        Profile {}
+        Profile {
+            user: current_user,
+            links: links.to_owned()
+        }
     });
 }
 
