@@ -524,6 +524,7 @@ fn SelectButton<'a>(cx: Scope<'a, SelectButtonProps<'a>>) -> Element {
 #[derive(Props)]
 struct ShowLinkProps<'a> {
     link: &'a Link,
+    show_select_button: bool,
 }
 
 fn ShowLink<'a>(cx: Scope<'a, ShowLinkProps<'a>>) -> Element {
@@ -548,8 +549,12 @@ fn ShowLink<'a>(cx: Scope<'a, ShowLinkProps<'a>>) -> Element {
         rsx! {
             div {
                 class: "flex gap-4 border-t dark:border-zinc-700 border-zinc-300 p-4 pt-4 w-full items-center",
-                SelectButton {
-                    onclick: on_select
+                if cx.props.show_select_button {
+                    rsx! {
+                        SelectButton {
+                            onclick: on_select
+                        }
+                    }
                 }
                 LinkIconComponent {
                     link: link
@@ -566,6 +571,8 @@ fn ShowLink<'a>(cx: Scope<'a, ShowLinkProps<'a>>) -> Element {
 #[derive(Props, PartialEq)]
 struct LinkListProps {
     links: Vec<Link>,
+    #[props(default = false)]
+    show_select_buttons: bool,
 }
 
 fn LinkList<'a>(cx: Scope<'a, LinkListProps>) -> Element {
@@ -576,6 +583,7 @@ fn LinkList<'a>(cx: Scope<'a, LinkListProps>) -> Element {
                     ShowLink {
                         key: "{link.id}",
                         link: link,
+                        show_select_button: cx.props.show_select_buttons
                     }
                 }
             })
@@ -758,7 +766,8 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
             }
             Bio {}
             LinkList {
-                links: links.to_vec()
+                links: links.to_vec(),
+                show_select_buttons: true
             }
             if **action != ProfileAction::None {
                 rsx! {
