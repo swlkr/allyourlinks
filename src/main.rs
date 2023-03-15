@@ -802,10 +802,22 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                     },
                 }
                 EditLinkButton {
-                    onclick: move |_| action.set(ProfileAction::Edit),
+                    onclick: move |_| {
+                        if *action.get() == ProfileAction::Edit {
+                            action.set(ProfileAction::None);
+                        } else {
+                            action.set(ProfileAction::Edit);
+                        }
+                    },
                 }
                 AddLinkButton {
-                    onclick: move |_| action.set(ProfileAction::Add),
+                    onclick: move |_| {
+                        if *action.get() == ProfileAction::Add {
+                            action.set(ProfileAction::None);
+                        } else {
+                            action.set(ProfileAction::Add);
+                        }
+                    },
                 }
             }
         }
