@@ -1028,6 +1028,8 @@ struct NavProps<'a> {
     user: Option<&'a User>,
 }
 
+const NAV_ICON_SIZE: u32 = 24;
+
 fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
     cx.render(rsx! {
         nav {
@@ -1071,8 +1073,8 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
                     href: HOME,
                     class: "flex flex-col justify-center items-center",
                     Icon {
-                        width: 16,
-                        height: 16,
+                        width: NAV_ICON_SIZE,
+                        height: NAV_ICON_SIZE,
                         icon: BsHouseFill
                     }
                     div {
@@ -1085,8 +1087,8 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
                     href: PROFILE,
                     class: "flex flex-col justify-center items-center",
                     Icon {
-                        width: 16,
-                        height: 16,
+                        width: NAV_ICON_SIZE,
+                        height: NAV_ICON_SIZE,
                         icon: BsPersonCircle
                     }
                     div {
@@ -1101,8 +1103,8 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
                         class: "flex flex-col justify-center items-center",
                         r#type: "submit",
                         Icon {
-                            width: 16,
-                            height: 16,
+                            width: NAV_ICON_SIZE,
+                            height: NAV_ICON_SIZE,
                             icon: BsDoorOpenFill
                         }
                         div {
