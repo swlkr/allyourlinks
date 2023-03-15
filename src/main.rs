@@ -333,21 +333,37 @@ async fn signup(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Res
     return Ok(());
 }
 
-#[inline_props]
-fn Login<'a>(cx: Scope, message: Option<&'a str>) -> Element<'a> {
-    cx.render(html! {
-        <div class="flex flex-col gap-16">
-            <Header />
-            <Form action="/login">
-                <div class="flex flex-col gap-2 md:max-w-lg md:mx-auto">
-                    <div class="flex flex-col">
-                        <div class="dark:text-white text-black">{*message}</div>
-                        <TextField name="login_code" autofocus={true} />
-                    </div>
-                    <Cta>"Login"</Cta>
-                </div>
-            </Form>
-        </div>
+#[derive(Props)]
+struct LoginProps<'a> {
+    message: &'a str,
+}
+
+fn Login<'a>(cx: Scope<'a, LoginProps<'a>>) -> Element<'a> {
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col gap-16",
+            Header {}
+            Form {
+                action: "/login",
+                div {
+                    class: "flex flex-col gap-2 md:max-w-lg md:mx-auto",
+                    div {
+                        class: "flex flex-col",
+                        div {
+                            class: "dark:text-white text-black",
+                            "{cx.props.message}"
+                        }
+                        TextField {
+                            name: "login_code",
+                            autofocus: true
+                        }
+                    }
+                    Cta {
+                        "login"
+                    }
+                }
+            }
+        }
     })
 }
 
@@ -362,7 +378,9 @@ async fn get_login(depot: &mut Depot) -> Text<String> {
         Layout {
             csrf_token: csrf_token,
             current_user: current_user,
-            Login {}
+            Login {
+                message: ""
+            }
         }
     }))
 }
@@ -842,8 +860,12 @@ fn Cta<'a>(cx: Scope<'a, CtaProps<'a>>) -> Element {
 
 #[inline_props]
 fn Submit<'a>(cx: Scope, value: &'a str) -> Element<'a> {
-    cx.render(html! {
-        <input r#type="submit" value={*value} class="cursor-pointer" />
+    cx.render(rsx! {
+        input {
+            r#type: "submit",
+            value: "{value}",
+            class: "cursor-pointer"
+        }
     })
 }
 
