@@ -3,16 +3,13 @@
 mod database;
 
 use anyhow::Result;
-use database::db;
 use dioxus::prelude::*;
 use dioxus_elements::input_data::keyboard_types::Key;
 use dioxus_free_icons::icons::bs_icons::*;
 use dioxus_free_icons::Icon;
-use dioxus_html_macro::html;
 use dioxus_liveview::LiveViewPool;
 use dioxus_ssr::render_lazy;
-use fermi::*;
-use rand::Rng;
+use fermi::{use_read, use_set, Atom};
 use rust_embed::RustEmbed;
 use salvo::affix;
 use salvo::csrf::{aes_gcm_session_csrf, CsrfDepotExt, FormFinder};
@@ -23,7 +20,6 @@ use salvo::serve_static::static_embed;
 use salvo::session::SessionDepotExt;
 use salvo::session::SessionHandler;
 use serde::Deserialize;
-use sqlx::sqlite::SqliteQueryResult;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::env;
@@ -32,6 +28,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::Level;
+
+use crate::database::{db, Link, User};
 
 pub const HOME: &str = "/";
 pub const LOGIN: &str = "/login";
@@ -77,11 +75,9 @@ async fn auth(depot: &mut Depot) -> Result<(), salvo::http::StatusError> {
 async fn set_current_user_handler(depot: &mut Depot) {
     let maybe_id: Option<i64> = depot.session().unwrap().get("user_id");
     if let Some(id) = maybe_id {
-        let user = sqlx::query_as!(User, "select id, username, login_code, updated_at, created_at, bio, photo from users where id = ?", id)
-            .fetch_one(db())
-            .await
-            .unwrap();
-        depot.inject(user);
+        if let Ok(user) = db().user_by_id(id).await {
+            depot.inject(user);
+        }
     }
 }
 
@@ -308,83 +304,28 @@ async fn home(depot: &mut Depot) -> Text<String> {
     }))
 }
 
-#[derive(Default, Debug, PartialEq, Clone)]
-struct User {
-    id: i64,
-    username: String,
-    login_code: String,
-    updated_at: Option<i64>,
-    created_at: i64,
-    bio: Option<String>,
-    photo: Option<String>,
-}
-
-impl User {
-    async fn by_id(id: i64) -> Result<User, sqlx::Error> {
-        return sqlx::query_as!(User, "select id as 'id!', username, login_code, updated_at, created_at, bio, photo from users where id = ?", id)
-            .fetch_one(db())
-            .await;
-    }
-
-    async fn by_username(username: String) -> Result<User, sqlx::Error> {
-        return sqlx::query_as!(User, "select id as 'id!', username, login_code, updated_at, created_at, bio, photo from users where username = ?", username)
-            .fetch_one(db())
-            .await;
-    }
-
-    async fn by_login_code(login_code: String) -> Result<User, sqlx::Error> {
-        return sqlx::query_as!(User, "select id as 'id!', username, login_code, updated_at, created_at, bio, photo from users where login_code = ?", login_code)
-            .fetch_one(db())
-            .await;
-    }
-
-    async fn update(&self) -> Result<User, sqlx::Error> {
-        sqlx::query_as!(
-            User,
-            "update users set bio = ?, updated_at = unixepoch() where id = ? returning id as 'id!', bio, photo, username as 'username!', login_code as 'login_code!', updated_at, created_at as 'created_at!'",
-            self.bio,
-            self.id
-        ).fetch_one(db()).await
-    }
-}
-
 #[derive(Deserialize)]
 struct NewUser {
     username: String,
 }
 
-impl NewUser {
-    async fn insert(&self) -> Result<User, sqlx::Error> {
-        let mut login_code: String = String::new();
-        for _ in 0..16 {
-            login_code.push_str(rand::thread_rng().gen_range(0..10).to_string().as_ref());
-        }
-        let id: i64 = sqlx::query!(
-            "insert into users (username, login_code) values (?, ?)",
-            self.username,
-            login_code
-        )
-        .execute(db())
-        .await?
-        .last_insert_rowid();
-        return User::by_id(id).await;
-    }
-}
-
 #[handler]
 async fn signup(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<()> {
     let new_user: NewUser = req.parse_form().await?;
-    let user: User = new_user.insert().await?;
-    // make links for every social icon on the home page
-    // 3 pieces of data
-    // 1. the name of the website
-    // 2. the url
-    // 3. icon itself
-    let links = Link::default_links();
-    for mut link in links {
-        link.url = format!("{}{}", link.url, user.username);
-        link.user_id = user.id;
-        let _ = link.create().await;
+    let user: User = db().insert_user(new_user.username).await?;
+    let default_links: Vec<(&str, &str)> = vec![
+        ("twitch.tv/", "twitch"),
+        ("twitter.com/", "twitter"),
+        ("instagram.com/", "instagram"),
+        ("youtube.com/", "youtube"),
+        ("tiktok.com/", "tiktok"),
+        ("discord.com/", "discord"),
+        ("github.com/", "github"),
+        ("stackoverflow.com/", "stackoverflow"),
+    ];
+    for (url, name) in default_links {
+        let url = format!("{}{}", url, user.username);
+        let _ = db().insert_link(user.id, url, Some(name.to_string())).await;
     }
     let session = depot.session_mut().unwrap();
     _ = session.insert("user_id", user.id)?;
@@ -426,87 +367,7 @@ async fn get_login(depot: &mut Depot) -> Text<String> {
     }))
 }
 
-#[derive(Deserialize, PartialEq, Clone, Debug, Default)]
-struct Link {
-    id: i64,
-    user_id: i64,
-    url: String,
-    name: Option<String>,
-    updated_at: Option<i64>,
-    created_at: i64,
-}
-
 impl Link {
-    async fn delete_by_ids(ids: Vec<i64>) -> Result<SqliteQueryResult, sqlx::Error> {
-        let sql = format!(
-            "delete from links where id in ({})",
-            (0..ids.len()).map(|_| "?").collect::<Vec<&str>>().join(",")
-        );
-        let mut q = sqlx::query(&sql);
-        for id in ids {
-            q = q.bind(id);
-        }
-        return q.execute(db()).await;
-    }
-
-    async fn all_by_user_id(user_id: i64) -> Vec<Link> {
-        return sqlx::query_as!(
-            Link,
-            "select id as 'id!', user_id, url, name, updated_at, created_at from links where user_id = ? order by created_at desc",
-            user_id
-        )
-        .fetch_all(db())
-        .await
-        .unwrap();
-    }
-
-    async fn insert<'a>(
-        user_id: i64,
-        url: &'a str,
-        name: Option<String>,
-    ) -> Result<SqliteQueryResult, sqlx::Error> {
-        sqlx::query!(
-            "insert into links (user_id, url, name) values (?, ?, ?)",
-            user_id,
-            url,
-            name
-        )
-        .execute(db())
-        .await
-    }
-
-    async fn create(&self) -> Result<SqliteQueryResult, sqlx::Error> {
-        sqlx::query!(
-            "insert into links (user_id, url, name) values (?, ?, ?)",
-            self.user_id,
-            self.url,
-            self.name
-        )
-        .execute(db())
-        .await
-    }
-
-    async fn update(id: i64, url: String, name: Option<String>) -> Result<Link, sqlx::Error> {
-        sqlx::query_as!(
-            Link,
-            "update links set name = ?, url = ?, updated_at = unixepoch() where id = ? returning id as 'id!', user_id as 'user_id!', url as 'url!', name, updated_at, created_at as 'created_at!'",
-            name,
-            url,
-            id
-        ).fetch_one(db()).await
-    }
-
-    fn new(url: &str, name: &str) -> Self {
-        Link {
-            url: url.to_owned(),
-            name: Some(name.to_owned()),
-            id: 0,
-            user_id: 0,
-            updated_at: None,
-            created_at: 0,
-        }
-    }
-
     fn icon(&self) -> Icon {
         if self.url.contains("twitter.com") {
             Icon::Twitter
@@ -542,19 +403,6 @@ impl Link {
             Icon::Globe => "",
         };
         return s.to_string();
-    }
-
-    fn default_links() -> Vec<Link> {
-        vec![
-            Link::new("twitch.tv/", "twitch"),
-            Link::new("twitter.com/", "twitter"),
-            Link::new("instagram.com/", "instagram"),
-            Link::new("youtube.com/", "youtube"),
-            Link::new("tiktok.com/", "tiktok"),
-            Link::new("discord.com/", "discord"),
-            Link::new("github.com/", "github"),
-            Link::new("stackoverflow.com/", "stackoverflow"),
-        ]
     }
 }
 
@@ -722,7 +570,7 @@ fn Bio(cx: Scope) -> Element {
     let onenter = move |_| {
         to_owned![set_user, user];
         cx.spawn(async move {
-            match user.update().await {
+            match db().update_user_bio(user.id, user.bio).await {
                 Ok(user) => {
                     set_user(user);
                 }
@@ -841,11 +689,11 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
         } else {
             cx.spawn(async move {
                 if let Some(id) = id {
-                    let _ = Link::update(id, url, name).await;
+                    let _ = db().update_link(id, url, name).await;
                 } else {
-                    let _ = Link::insert(user.id, &url, name).await;
+                    let _ = db().insert_link(user.id, url, name).await;
                 }
-                let new_links = Link::all_by_user_id(user.id).await;
+                let new_links = db().links_by_user_id(user.id).await;
                 links.set(new_links);
                 action.set(ProfileAction::None);
             });
@@ -864,8 +712,8 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
         to_owned![links, user, selected_link_ids, action];
         cx.spawn(async move {
             let ids: Vec<i64> = selected_link_ids.into_iter().collect();
-            let _ = Link::delete_by_ids(ids).await;
-            let new_links = Link::all_by_user_id(user.id).await;
+            let _ = db().delete_links(ids).await;
+            let new_links = db().links_by_user_id(user.id).await;
             links.set(new_links);
             action.set(ProfileAction::None);
         });
@@ -944,7 +792,7 @@ struct LoginUser {
 #[handler]
 async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) -> Result<()> {
     let login_user: LoginUser = req.parse_form().await?;
-    let maybe_user: Option<User> = User::by_login_code(login_user.login_code).await.ok();
+    let maybe_user: Option<User> = db().user_by_login_code(login_user.login_code).await.ok();
     let session = depot.session_mut().unwrap();
     if let Some(u) = maybe_user {
         session.insert("user_id", u.id).unwrap();
@@ -1564,7 +1412,7 @@ async fn public_profile(
     res: &mut Response,
 ) -> Result<(), StatusError> {
     let params: ProfileParams = req.parse_params().unwrap();
-    let user_result = User::by_username(params.username).await;
+    let user_result = db().user_by_username(params.username).await;
     let user = match user_result {
         Ok(u) => u,
         Err(_) => return Err(StatusError::not_found()),
@@ -1576,7 +1424,7 @@ async fn public_profile(
         id,
         ..
     } = user;
-    let links = Link::all_by_user_id(id).await;
+    let links = db().links_by_user_id(id).await;
     let props = LayoutProps::from_depot(depot).await;
     let bio = match bio {
         Some(b) => b,
@@ -1664,7 +1512,7 @@ async fn connect(
         .to_string();
 
     if let Some(current_user) = maybe_user {
-        let links = Link::all_by_user_id(current_user.id).await;
+        let links = db().links_by_user_id(current_user.id).await;
         WebSocketUpgrade::new()
             .upgrade(req, res, |ws| async move {
                 _ = view
