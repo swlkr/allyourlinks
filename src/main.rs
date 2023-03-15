@@ -193,6 +193,7 @@ impl<'a> LayoutProps<'a> {
 }
 
 fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element<'a> {
+    use_init_atom_root(cx);
     use_shared_state_provider(cx, || AppState {
         csrf_token: cx.props.csrf_token.to_owned(),
         current_user: cx.props.current_user.cloned(),
