@@ -88,6 +88,7 @@ dependencies = [
  "dioxus-liveview",
  "dioxus-ssr",
  "fermi",
+ "once_cell",
  "rand 0.8.5",
  "rust-embed",
  "salvo",

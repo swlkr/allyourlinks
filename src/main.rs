@@ -9,7 +9,7 @@ use dioxus_free_icons::icons::bs_icons::*;
 use dioxus_free_icons::Icon;
 use dioxus_liveview::LiveViewPool;
 use dioxus_ssr::render_lazy;
-use fermi::{use_read, use_set, Atom};
+use fermi::{use_init_atom_root, use_read, use_set, Atom};
 use rust_embed::RustEmbed;
 use salvo::affix;
 use salvo::csrf::{aes_gcm_session_csrf, CsrfDepotExt, FormFinder};
