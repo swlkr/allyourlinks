@@ -147,6 +147,61 @@ fn Form<'a>(cx: Scope<'a, FormProps<'a>>) -> Element {
     ))
 }
 
+#[derive(Props)]
+struct BodyProps<'a> {
+    children: Element<'a>,
+    csrf_token: &'a str,
+    #[props(!optional)]
+    current_user: Option<&'a User>,
+    #[props(optional)]
+    liveview_js: Option<String>,
+}
+
+impl<'a> BodyProps<'a> {
+    pub async fn from_depot(depot: &mut Depot) -> BodyProps {
+        let addr = env::var("SERVER_ADDR").unwrap();
+        let current_user = depot.obtain::<User>();
+        let liveview_js = match &current_user {
+            Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
+                "ws://{}/ws?username={}",
+                addr, username
+            ))),
+            _ => None,
+        };
+        let csrf_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
+
+        return BodyProps {
+            csrf_token,
+            current_user,
+            liveview_js,
+            children: Element::default(),
+        };
+    }
+}
+
+fn Body<'a>(cx: Scope<'a, BodyProps<'a>>) -> Element {
+    let BodyProps {
+        children,
+        csrf_token,
+        current_user,
+        liveview_js,
+    } = cx.props;
+    use_shared_state_provider(cx, || AppState {
+        csrf_token: csrf_token.to_string(),
+        current_user: current_user.cloned(),
+    });
+    let liveview_js = match liveview_js {
+        Some(js) => js.clone(),
+        None => String::with_capacity(0),
+    };
+    cx.render(rsx! {
+        div {
+            children
+            "{liveview_js}"
+        }
+    })
+}
+
 #[derive(PartialEq, Props)]
 struct AppProps {
     csrf_token: String,
@@ -160,70 +215,25 @@ struct AppState {
     current_user: Option<User>,
 }
 
-#[derive(Props, Debug)]
-struct LayoutProps<'a> {
-    csrf_token: &'a str,
-    #[props(!optional)]
-    current_user: Option<&'a User>,
-    #[props(optional)]
-    liveview_js: Option<String>,
-    children: Element<'a>,
-}
-
-impl<'a> LayoutProps<'a> {
-    pub async fn from_depot(depot: &mut Depot) -> LayoutProps {
-        let addr = env::var("SERVER_ADDR").unwrap();
-        let current_user = depot.obtain::<User>();
-        let liveview_js = match &current_user {
-            Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
-                "ws://{}/ws?username={}",
-                addr, username
-            ))),
-            _ => None,
-        };
-        let csrf_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
-
-        return LayoutProps {
-            csrf_token,
-            current_user,
-            liveview_js,
-            children: Element::default(),
-        };
-    }
-}
-
-fn Layout<'a>(cx: Scope<'a, LayoutProps<'a>>) -> Element<'a> {
+fn Layout<'a>(cx: Scope<'a, ChildrenProps<'a>>) -> Element<'a> {
     use_init_atom_root(cx);
-    use_shared_state_provider(cx, || AppState {
-        csrf_token: cx.props.csrf_token.to_owned(),
-        current_user: cx.props.current_user.cloned(),
-    });
-    let liveview_js = match &cx.props.liveview_js {
-        Some(js) => js.clone(),
-        None => String::with_capacity(0),
-    };
-    cx.render(
-        rsx! {
-            "<!DOCTYPE html>"
-            "<html lang=en>"
-                head {
-                    title {
-                      "all your links"  
-                    }
-                    meta { charset: "utf-8" }
-                    meta { name: "viewport", content:"width=device-width" }
-                    link { rel: "stylesheet", href: "/output.css" }
-                    // style { "#main {{ height: calc(100vh - 88px); }}" }
+    cx.render(rsx! {
+        "<!DOCTYPE html>"
+        "<html lang=en>"
+            head {
+                title {
+                  "all your links"
                 }
-                body {
-                    class: "dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto mb-[150px]",
-                    Nav { user: cx.props.current_user }
-                    &cx.props.children
-                    "{liveview_js}"
-                }
-            "</html>"
-        }
-    )
+                meta { charset: "utf-8" }
+                meta { name: "viewport", content:"width=device-width" }
+                link { rel: "stylesheet", href: "/output.css" }
+            }
+            body {
+                class: "dark:bg-zinc-900 dark:text-yellow-400 bg-yellow-400 text-zinc-900 font-sans max-w-3xl mx-auto mb-[150px]",
+                &cx.props.children
+            }
+        "</html>"
+    })
 }
 
 #[derive(PartialEq)]
@@ -254,15 +264,20 @@ fn Header(cx: Scope) -> Element {
     })
 }
 
-#[inline_props]
-fn Home(cx: Scope, error: Option<CreateUserError>) -> Element {
+#[derive(Props, PartialEq)]
+struct HomeProps {
+    error: Option<CreateUserError>,
+}
+
+fn Home<'a>(cx: Scope<'a, HomeProps>) -> Element {
+    let HomeProps { error } = cx.props;
     let err = match error {
         Some(err) => err.to_string(),
         None => String::default(),
     };
     cx.render(rsx! {
         div {
-            class: "flex flex-col gap-16 px-4 lg:px-0",
+            class: "flex flex-col gap-16 px-4 md:px-0 mt-16 md:mt-0",
             Header {}
             Form {
                 action: "/"
@@ -291,16 +306,19 @@ fn Home(cx: Scope, error: Option<CreateUserError>) -> Element {
 
 #[handler]
 async fn home(depot: &mut Depot) -> Text<String> {
-    let LayoutProps {
+    let BodyProps {
         csrf_token,
         current_user,
         ..
-    } = LayoutProps::from_depot(depot).await;
+    } = BodyProps::from_depot(depot).await;
     Text::Html(render_lazy(rsx! {
         Layout {
-            csrf_token: csrf_token,
-            current_user: current_user,
-            Home {}
+            Body {
+                csrf_token: csrf_token,
+                current_user: current_user,
+                Nav {}
+                Home {}
+            }
         }
     }))
 }
@@ -370,17 +388,20 @@ fn Login<'a>(cx: Scope<'a, LoginProps<'a>>) -> Element<'a> {
 
 #[handler]
 async fn get_login(depot: &mut Depot) -> Text<String> {
-    let LayoutProps {
+    let BodyProps {
         csrf_token,
         current_user,
         ..
-    } = LayoutProps::from_depot(depot).await;
+    } = BodyProps::from_depot(depot).await;
     Text::Html(render_lazy(rsx! {
         Layout {
-            csrf_token: csrf_token,
-            current_user: current_user,
-            Login {
-                message: ""
+            Nav {}
+            Body {
+                csrf_token: csrf_token,
+                current_user: current_user,
+                Login {
+                    message: ""
+                }
             }
         }
     }))
@@ -425,9 +446,13 @@ impl Link {
     }
 }
 
-#[inline_props]
-fn LinkIconComponent<'a>(cx: Scope, link: &'a Link) -> Element<'a> {
-    cx.render(match link.icon() {
+#[derive(Props)]
+struct LinkIconComponentProps<'a> {
+    link: &'a Link,
+}
+
+fn LinkIconComponent<'a>(cx: Scope<'a, LinkIconComponentProps<'a>>) -> Element<'a> {
+    cx.render(match &cx.props.link.icon() {
         Icon::Twitch => rsx!(Icon {
             width: 32,
             height: 32,
@@ -746,6 +771,7 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
         });
     };
     cx.render(rsx! {
+        Nav { }
         div {
             class: "flex flex-col max-w-3xl mx-auto gap-8 items-center h-full relative w-full mt-8 relative",
             {
@@ -839,17 +865,19 @@ async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) ->
         res.render(Redirect::other(PROFILE));
     } else {
         // TODO exponential backoff
-        let LayoutProps {
+        let BodyProps {
             csrf_token,
             current_user,
             ..
-        } = LayoutProps::from_depot(depot).await;
+        } = BodyProps::from_depot(depot).await;
         res.render(Text::Html(render_lazy(rsx! {
             Layout {
-                csrf_token: csrf_token,
-                current_user: current_user,
-                Login {
-                    message: "Invalid login code"
+                Body {
+                    csrf_token: csrf_token,
+                    current_user: current_user,
+                    Login {
+                        message: "Invalid login code"
+                    }
                 }
             }
         })));
@@ -865,11 +893,11 @@ fn logout(depot: &mut Depot, res: &mut Response) {
 }
 
 #[derive(Props)]
-struct CtaProps<'a> {
+struct ChildrenProps<'a> {
     children: Element<'a>,
 }
 
-fn Cta<'a>(cx: Scope<'a, CtaProps<'a>>) -> Element {
+fn Cta<'a>(cx: Scope<'a, ChildrenProps<'a>>) -> Element {
     cx.render(
         rsx! {
             button {
@@ -905,7 +933,7 @@ fn IconList<'a>(cx: Scope<'a, IconListProps<'a>>) -> Element {
     };
     cx.render(rsx!(
         div {
-            class: "grid grid-cols-4 gap-8 md:mx-auto",
+            class: "grid grid-cols-4 gap-8 md:mx-auto place-items-center",
             button {
                 onclick: move |_| on_click(Icon::Github),
                 Icon {
@@ -1022,15 +1050,20 @@ fn Sheet<'a>(cx: Scope<'a, SheetProps<'a>>) -> Element<'a> {
     );
 }
 
-#[derive(Props, PartialEq)]
-struct NavProps<'a> {
-    #[props(!optional)]
-    user: Option<&'a User>,
-}
-
 const NAV_ICON_SIZE: u32 = 24;
 
-fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
+#[derive(Props, PartialEq)]
+struct NavLinksProps {
+    #[props(!optional)]
+    current_user: Option<User>,
+    profile_href: String,
+}
+
+fn NavLinks<'a>(cx: Scope<'a, NavLinksProps>) -> Element<'a> {
+    let NavLinksProps {
+        current_user,
+        profile_href,
+    } = cx.props;
     cx.render(rsx! {
         nav {
             class: "gap-8 justify-center py-8 hidden md:flex",
@@ -1039,13 +1072,13 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
                 "Home"
             }
             {
-                match &cx.props.user {
+                match *current_user {
                     Some(_) => {
                         rsx! {
                             div {
                                 class: "flex gap-8",
                                 a {
-                                    href: PROFILE,
+                                    href: "{profile_href}",
                                     "Profile"
                                 }
                                 Form {
@@ -1066,6 +1099,17 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
                 }
             }
         }
+    })
+}
+
+#[derive(Props, PartialEq)]
+struct NavBarProps {
+    profile_href: String,
+}
+
+fn NavBar<'a>(cx: Scope<'a, NavBarProps>) -> Element<'a> {
+    let NavBarProps { profile_href } = cx.props;
+    cx.render(rsx! {
         nav {
             class: "flex md:hidden lg:hidden justify-between items-center fixed bottom-0 left-0 right-0 z-10",
             NavButton {
@@ -1084,7 +1128,7 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
             }
             NavButton {
                 a {
-                    href: PROFILE,
+                    href: "{profile_href}",
                     class: "flex flex-col justify-center items-center",
                     Icon {
                         width: NAV_ICON_SIZE,
@@ -1117,26 +1161,32 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element<'a> {
     })
 }
 
-#[inline_props]
-fn NavButton<'a>(cx: Scope, children: Element<'a>) -> Element<'a> {
+fn Nav<'a>(cx: Scope<'a>) -> Element<'a> {
+    let app_state = use_shared_state::<AppState>(cx);
+    let current_user = match &app_state {
+        Some(app_state) => app_state.read().current_user.clone(),
+        None => None,
+    };
+    let profile_href = match &current_user {
+        Some(u) => format!("/@{}", u.username),
+        None => String::with_capacity(0),
+    };
+    cx.render(rsx! {
+        NavLinks {
+            current_user: current_user,
+            profile_href: profile_href.clone()
+        }
+        NavBar {
+            profile_href: profile_href.clone()
+        }
+    })
+}
+
+fn NavButton<'a>(cx: Scope<'a, ChildrenProps<'a>>) -> Element<'a> {
     cx.render(rsx!(div {
         class: "bg-zinc-700 text-yellow-400 py-4 flex flex-auto text-center justify-center",
         &cx.props.children
     }))
-}
-
-#[inline_props]
-fn Button<'a>(
-    cx: Scope,
-    onclick: EventHandler<'a, MouseEvent>,
-    children: Element<'a>,
-) -> Element<'a> {
-    cx.render(rsx! {
-        button {
-            onclick: move |event| onclick.call(event),
-            &cx.props.children
-        }
-    })
 }
 
 #[derive(Props)]
@@ -1157,13 +1207,17 @@ fn RoundedRect<'a>(cx: Scope<'a, RoundedRect<'a>>) -> Element<'a> {
     )
 }
 
-#[inline_props]
-fn CircleButton<'a>(
-    cx: Scope,
+#[derive(Props)]
+struct CircleButtonProps<'a> {
     onclick: EventHandler<'a, MouseEvent>,
     disabled: Option<bool>,
     children: Element<'a>,
-) -> Element<'a> {
+}
+
+fn CircleButton<'a>(cx: Scope<'a, CircleButtonProps<'a>>) -> Element<'a> {
+    let CircleButtonProps {
+        disabled, onclick, ..
+    } = cx.props;
     let is_disabled = match disabled {
         Some(true) => true,
         Some(false) => false,
@@ -1188,13 +1242,34 @@ fn CircleButton<'a>(
     })
 }
 
-#[inline_props]
-fn CircleButtonSmall<'a>(
-    cx: Scope,
+#[derive(Props)]
+struct CircleLink<'a> {
+    href: &'a str,
+    children: Element<'a>,
+}
+
+fn CircleLink<'a>(cx: Scope<'a, CircleLink<'a>>) -> Element<'a> {
+    let CircleLink { children, href } = cx.props;
+    cx.render(rsx! {
+        a {
+            class: "rounded-full dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 p-3 w-12 h-12 disabled:opacity-50",
+            href: *href,
+            children
+        }
+    })
+}
+
+#[derive(Props)]
+struct CircleButtonSmallProps<'a> {
     onclick: EventHandler<'a, MouseEvent>,
     disabled: Option<bool>,
     children: Element<'a>,
-) -> Element<'a> {
+}
+
+fn CircleButtonSmall<'a>(cx: Scope<'a, CircleButtonSmallProps<'a>>) -> Element<'a> {
+    let CircleButtonSmallProps {
+        onclick, disabled, ..
+    } = cx.props;
     let is_disabled = match disabled {
         Some(true) => true,
         Some(false) => false,
@@ -1219,13 +1294,14 @@ fn CircleButtonSmall<'a>(
     })
 }
 
-#[inline_props]
-fn AddLinkButton<'a>(
-    cx: Scope,
+#[derive(Props)]
+struct AddLinkButtonProps<'a> {
     onclick: EventHandler<'a, MouseEvent>,
     disabled: Option<bool>,
-    children: Element<'a>,
-) -> Element<'a> {
+}
+
+fn AddLinkButton<'a>(cx: Scope<'a, AddLinkButtonProps<'a>>) -> Element<'a> {
+    let AddLinkButtonProps { onclick, disabled } = cx.props;
     cx.render(rsx! {
         div {
             class: "flex flex-col gap-2 items-center",
@@ -1242,13 +1318,14 @@ fn AddLinkButton<'a>(
     })
 }
 
-#[inline_props]
-fn EditLinkButton<'a>(
-    cx: Scope,
+#[derive(Props)]
+struct EditLinkButtonProps<'a> {
     onclick: EventHandler<'a, MouseEvent>,
     disabled: Option<bool>,
-    children: Element<'a>,
-) -> Element<'a> {
+}
+
+fn EditLinkButton<'a>(cx: Scope<'a, EditLinkButtonProps<'a>>) -> Element<'a> {
+    let EditLinkButtonProps { onclick, disabled } = cx.props;
     cx.render(rsx! {
         div {
             class: "flex flex-col gap-2 items-center",
@@ -1265,13 +1342,14 @@ fn EditLinkButton<'a>(
     })
 }
 
-#[inline_props]
-fn DeleteLinkButton<'a>(
-    cx: Scope,
+#[derive(Props)]
+struct DeleteLinkButtonProps<'a> {
     onclick: EventHandler<'a, MouseEvent>,
     disabled: Option<bool>,
-    children: Element<'a>,
-) -> Element<'a> {
+}
+
+fn DeleteLinkButton<'a>(cx: Scope<'a, DeleteLinkButtonProps<'a>>) -> Element<'a> {
+    let DeleteLinkButtonProps { onclick, disabled } = cx.props;
     cx.render(rsx! {
         div {
             class: "flex flex-col gap-2 items-center",
@@ -1371,9 +1449,8 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
     )
 }
 
-#[inline_props]
-fn TextField<'a>(
-    cx: Scope,
+#[derive(Props)]
+struct TextFieldProps<'a> {
     name: &'a str,
     lbl: Option<&'a str>,
     autofocus: Option<bool>,
@@ -1383,7 +1460,20 @@ fn TextField<'a>(
     oninput: Option<EventHandler<'a, Event<FormData>>>,
     onenter: Option<EventHandler<'a, Event<FormData>>>,
     placeholder: Option<&'a str>,
-) -> Element<'a> {
+}
+
+fn TextField<'a>(cx: Scope<'a, TextFieldProps<'a>>) -> Element<'a> {
+    let TextFieldProps {
+        autofocus,
+        placeholder,
+        value,
+        lbl,
+        onblur,
+        onkeypress,
+        oninput,
+        onenter,
+        name,
+    } = cx.props;
     let autofocus_attr = if let Some(_) = *autofocus {
         "autofocus"
     } else {
@@ -1434,14 +1524,18 @@ fn app(cx: Scope<AppProps>) -> Element {
     let AppProps {
         current_user,
         links,
-        ..
+        csrf_token,
     } = cx.props;
     let set_user = use_set(cx, USER);
     set_user(current_user.clone());
     return cx.render(rsx! {
-        Profile {
-            user: current_user,
-            links: links.to_owned()
+        Body {
+            csrf_token: csrf_token,
+            current_user: Some(current_user),
+            Profile {
+                user: current_user,
+                links: links.to_owned()
+            }
         }
     });
 }
@@ -1471,65 +1565,81 @@ async fn public_profile(
         ..
     } = user;
     let links = db().links_by_user_id(id).await;
-    let props = LayoutProps::from_depot(depot).await;
+    let props = BodyProps::from_depot(depot).await;
     let bio = match bio {
         Some(b) => b,
         None => String::with_capacity(0),
     };
     res.render(Text::Html(render_lazy(rsx! (
         Layout {
-            csrf_token: props.csrf_token,
-            current_user: props.current_user,
-            div {
-                class: "flex flex-col max-w-3xl px-4 lg:px-0 mx-auto gap-8 text-center items-center h-full relative w-full",
-                {
-                    match photo {
-                        Some(p) => rsx! {
-                            img { src: "{p}" }
-                        },
-                        _ => rsx! { Icon {
-                            width: 64,
-                            height: 64,
-                            icon: BsPersonCircle
-                        }}
+            Body {
+                csrf_token: props.csrf_token,
+                current_user: props.current_user,
+                div {
+                    class: "flex flex-col max-w-3xl px-4 lg:px-0 mx-auto gap-8 text-center items-center h-full relative w-full",
+                    {
+                        match photo {
+                            Some(p) => rsx! {
+                                img { src: "{p}" }
+                            },
+                            _ => rsx! { Icon {
+                                width: 64,
+                                height: 64,
+                                icon: BsPersonCircle
+                            }}
+                        }
+                    }
+                    div {
+                        class: "font-bold text-xl",
+                        "@{username}"
+                    }
+                    div {
+                        "{bio}"
+                    }
+                    LinkList {
+                        links: links
+                    }
+                    if props.current_user.is_some() {
+                        rsx! {
+                            div {
+                                class: "flex flex-col gap-4 fixed right-4 bottom-20",
+                                div {
+                                    class: "flex flex-col gap-2 items-center",
+                                    CircleLink {
+                                        href: PROFILE,
+                                        div {
+                                            class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -mt-1.5",
+                                            Icon { width: 32, height: 32, icon: BsPencil }
+                                        }
+                                    }
+                                    div { "Edit" }
+                                }
+                            }
+                        }
                     }
                 }
-                div {
-                    class: "font-bold text-xl",
-                    "@{username}"
-                }
-                div {
-                    "{bio}"
-                }
-                LinkList {
-                    links: links
-                }
-                div {
-                    class: "flex flex-col gap-4 fixed right-4 bottom-20",
-                    a {
-                        href: "/profile",
-                        "Edit"
-                    }
-                }
+            }
         }
-    }))));
+    ))));
     return Ok(());
 }
 
 #[handler]
 async fn profile(res: &mut Response, depot: &mut Depot) -> Result<(), StatusError> {
-    let LayoutProps {
+    let BodyProps {
         current_user,
         csrf_token,
         liveview_js,
         ..
-    } = LayoutProps::from_depot(depot).await;
+    } = BodyProps::from_depot(depot).await;
     res.render(Text::Html(render_lazy(rsx! (
         Layout {
-            csrf_token: csrf_token,
-            current_user: current_user,
-            liveview_js: liveview_js.unwrap(),
-            div { id: "main" },
+            Body {
+                csrf_token: csrf_token,
+                current_user: current_user,
+                liveview_js: liveview_js.unwrap(),
+                div { id: "main" }
+            }
         }
     ))));
     return Ok(());
