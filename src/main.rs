@@ -1069,7 +1069,7 @@ fn NavLinks<'a>(cx: Scope<'a, NavLinksProps>) -> Element<'a> {
             class: "gap-8 justify-center py-8 hidden md:flex",
             a {
                 href: HOME,
-                "Home"
+                span { "Home" }
             }
             {
                 match *current_user {
@@ -1079,7 +1079,7 @@ fn NavLinks<'a>(cx: Scope<'a, NavLinksProps>) -> Element<'a> {
                                 class: "flex gap-8",
                                 a {
                                     href: "{profile_href}",
-                                    "Profile"
+                                    span { "Profile" }
                                 }
                                 Form {
                                     action: LOGOUT,
@@ -1093,7 +1093,7 @@ fn NavLinks<'a>(cx: Scope<'a, NavLinksProps>) -> Element<'a> {
                     _ => rsx! {
                         a {
                             href: LOGIN,
-                            "Login"
+                            span { "Login" }
                         }
                     }
                 }
