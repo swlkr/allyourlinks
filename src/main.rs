@@ -1575,6 +1575,7 @@ async fn public_profile(
             Body {
                 csrf_token: props.csrf_token,
                 current_user: props.current_user,
+                Nav {}
                 div {
                     class: "flex flex-col max-w-3xl px-4 lg:px-0 mx-auto gap-8 text-center items-center h-full relative w-full",
                     {
