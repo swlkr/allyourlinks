@@ -20,7 +20,6 @@ use salvo::serve_static::static_embed;
 use salvo::session::SessionDepotExt;
 use salvo::session::SessionHandler;
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::convert::TryInto;
 use std::env;
 use std::net::SocketAddr;
@@ -158,15 +157,9 @@ struct BodyProps<'a> {
 
 impl<'a> BodyProps<'a> {
     pub async fn from_depot(depot: &mut Depot) -> BodyProps {
-        let addr = env::var("WS_ADDR").unwrap();
+        let ws_addr = env::var("WS_ADDR").unwrap();
         let current_user = depot.obtain::<User>();
-        let liveview_js = match &current_user {
-            Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
-                "ws://{}/ws?username={}",
-                addr, username
-            ))),
-            _ => None,
-        };
+        let liveview_js = Some(dioxus_liveview::interpreter_glue(&ws_addr));
         let csrf_token = depot.csrf_token().map(|s| &**s).unwrap_or_default();
 
         return BodyProps {
@@ -1614,7 +1607,7 @@ async fn connect(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), StatusError> {
-    let addr = format!("http://{}", env::var("WS_ADDR").unwrap());
+    let addr = env::var("ORIGIN").unwrap();
     let origin = match req.header::<String>(ORIGIN) {
         Some(o) => o,
         None => String::default(),
