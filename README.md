@@ -4,6 +4,18 @@ This is a very simple, mostly not broken link in bio experiment using rust and d
 
 There may or may not be a [live preview here](https://dawn-wave-7794.fly.dev/) depending on when you read this.
 
+### quickstart
+
+```sh
+git clone https://github.com/swlkr/allyourlinks.git
+cd allyourlinks
+cp .env.example .env
+export $(cat .env | xargs)
+cargo run
+# wait a while for cargo to download and compile the crates, there's a lot of them
+# open localhost:9001
+```
+
 ### stack
 
 - tailwindcss
