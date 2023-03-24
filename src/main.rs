@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::Level;
+use tracing::{debug, Level};
 
 use crate::database::{db, Link, User};
 
@@ -38,7 +38,6 @@ pub const PROFILE: &str = "/profile";
 pub const PUBLIC_PROFILE: &str = "/@<username>";
 
 static USER: Atom<User> = |_| User::default();
-static SELECTED_LINK_IDS: Atom<HashSet<i64>> = |_| HashSet::new();
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -159,7 +158,7 @@ struct BodyProps<'a> {
 
 impl<'a> BodyProps<'a> {
     pub async fn from_depot(depot: &mut Depot) -> BodyProps {
-        let addr = env::var("SERVER_ADDR").unwrap();
+        let addr = env::var("WS_ADDR").unwrap();
         let current_user = depot.obtain::<User>();
         let liveview_js = match &current_user {
             Some(User { username, .. }) => Some(dioxus_liveview::interpreter_glue(&format!(
@@ -289,7 +288,7 @@ fn Home<'a>(cx: Scope<'a, HomeProps>) -> Element {
                             class: "dark:text-white text-black",
                             err
                         }
-                        TextField {
+                        TextInput {
                             name :"username"
                             autofocus: true
                         }
@@ -372,7 +371,7 @@ fn Login<'a>(cx: Scope<'a, LoginProps<'a>>) -> Element<'a> {
                             class: "dark:text-white text-black",
                             "{cx.props.message}"
                         }
-                        TextField {
+                        TextInput {
                             name: "login_code",
                             autofocus: true
                         }
@@ -503,13 +502,16 @@ fn LinkIconComponent<'a>(cx: Scope<'a, LinkIconComponentProps<'a>>) -> Element<'
 
 #[derive(Props)]
 struct DeleteLinkProps<'a> {
+    num_links: usize,
     ondelete: EventHandler<'a>,
 }
 
 fn DeleteLink<'a>(cx: Scope<'a, DeleteLinkProps<'a>>) -> Element {
-    let selected_link_ids: &HashSet<i64> = use_read(cx, SELECTED_LINK_IDS);
-    let num_to_delete = selected_link_ids.len();
-    let s = match num_to_delete {
+    let DeleteLinkProps {
+        ondelete,
+        num_links,
+    } = cx.props;
+    let s = match num_links {
         1 => "link",
         _ => "links",
     };
@@ -517,8 +519,8 @@ fn DeleteLink<'a>(cx: Scope<'a, DeleteLinkProps<'a>>) -> Element {
         div {
             class: "flex gap-12 pt-8",
             RoundedRect {
-                onclick: move |_| cx.props.ondelete.call(()),
-                "Delete ({num_to_delete}) {s}?"
+                onclick: move |_| ondelete.call(()),
+                "Delete ({num_links}) {s}?"
             }
         }
     })
@@ -549,66 +551,75 @@ fn SelectButton<'a>(cx: Scope<'a, SelectButtonProps<'a>>) -> Element {
 #[derive(Props)]
 struct ShowLinkProps<'a> {
     link: &'a Link,
-    show_select_button: bool,
+    #[props(optional)]
+    onselect: Option<EventHandler<'a, i64>>,
+    show_select: bool,
 }
 
 fn ShowLink<'a>(cx: Scope<'a, ShowLinkProps<'a>>) -> Element {
-    let selected_links: &HashSet<i64> = use_read(cx, SELECTED_LINK_IDS);
-    let set_selected_links = use_set(cx, SELECTED_LINK_IDS);
-    let link = cx.props.link;
+    let ShowLinkProps {
+        link,
+        onselect,
+        show_select,
+    } = cx.props;
     let display = match &link.name {
-        Some(n) => n,
+        Some(name) => name,
         None => &link.url,
     };
-    let on_select = move |_| {
-        to_owned![selected_links, set_selected_links];
-        let mut new_links: HashSet<i64> = selected_links;
-        if new_links.contains(&link.id) {
-            new_links.remove(&link.id);
-        } else {
-            new_links.insert(link.id);
+    let onclick = move |_| {
+        if let Some(onselect) = onselect {
+            onselect.call(link.id)
         }
-        set_selected_links(new_links);
     };
-    cx.render(
-        rsx! {
-            div {
-                class: "flex gap-4 border-t dark:border-zinc-700 border-zinc-300 p-4 pt-4 w-full items-center",
-                if cx.props.show_select_button {
-                    rsx! {
-                        SelectButton {
-                            onclick: on_select
-                        }
-                    }
-                }
-                LinkIconComponent {
-                    link: link
-                }
-                a {
-                    class: "grow",
-                    "{display}"
-                }
-            }
-        }
-    )
-}
-
-#[derive(Props, PartialEq)]
-struct LinkListProps {
-    links: Vec<Link>,
-    #[props(default = false)]
-    show_select_buttons: bool,
-}
-
-fn LinkList<'a>(cx: Scope<'a, LinkListProps>) -> Element {
     cx.render(rsx! {
         div {
-            cx.props.links.iter().map(|link| {
+            class: "flex gap-4 border-t dark:border-zinc-700 border-zinc-300 p-4 pt-4 w-full items-center",
+            if *show_select {
+                rsx! {
+                    SelectButton {
+                        onclick: onclick
+                    }
+                }
+            }
+            LinkIconComponent {
+                link: link
+            }
+            a {
+                class: "grow",
+                "{display}"
+            }
+        }
+    })
+}
+
+#[derive(Props)]
+struct LinkListProps<'a> {
+    links: Vec<Link>,
+    #[props(optional)]
+    onselect: Option<EventHandler<'a, i64>>,
+    show_select: bool,
+}
+
+fn LinkList<'a>(cx: Scope<'a, LinkListProps<'a>>) -> Element<'a> {
+    let LinkListProps {
+        links,
+        onselect,
+        show_select,
+    } = cx.props;
+    let onselect = move |id| {
+        if let Some(onselect) = onselect {
+            onselect.call(id)
+        }
+    };
+    cx.render(rsx! {
+        div {
+            links.iter().map(|link| {
                 rsx! {
                     ShowLink {
                         key: "{link.id}",
                         link: link,
-                        show_select_button: cx.props.show_select_buttons
+                        onselect: onselect,
+                        show_select: *show_select
                     }
                 }
             })
@@ -636,8 +647,8 @@ fn Bio(cx: Scope) -> Element {
         set_user(user);
     };
     let bio = match &user.bio {
-        Some(b) => b.clone(),
-        None => "Add your bio here".to_string(),
+        Some(b) => b,
+        None => "Add your bio here",
     };
     cx.render(rsx! {
         div {
@@ -656,11 +667,11 @@ fn Bio(cx: Scope) -> Element {
 struct AddEditLinkProps<'a> {
     onsave: EventHandler<'a, (Option<i64>, String, Option<String>)>,
     #[props(!optional)]
-    link: Option<&'a Link>,
+    link: Option<Link>,
 }
 
 fn AddEditLink<'a>(cx: Scope<'a, AddEditLinkProps<'a>>) -> Element {
-    let (id, url, name) = match cx.props.link {
+    let (id, url, name) = match &cx.props.link {
         Some(link) => (Some(link.id), link.url.clone(), link.name.clone()),
         None => (None, String::default(), None),
     };
@@ -728,8 +739,8 @@ struct ProfileProps<'a> {
 fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
     let user = cx.props.user;
     let links = use_state(cx, || cx.props.links.clone());
-    let selected_link_ids: &HashSet<i64> = use_read(cx, SELECTED_LINK_IDS);
     let action = use_state(cx, || ProfileAction::None);
+    let link_ids: &UseState<Vec<i64>> = use_state(cx, || Vec::new());
     let User {
         photo, username, ..
     } = user;
@@ -751,27 +762,37 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
             });
         }
     };
-    let id = selected_link_ids.iter().map(|x| *x).last();
-    let link = if let Some(id) = id {
-        links.iter().find(|l| l.id == id)
-    } else {
-        None
+    let onselect = move |id: i64| {
+        to_owned![link_ids];
+        let mut ids = link_ids.get().clone();
+        if let Some(idx) = ids.iter().position(|x| *x == id) {
+            ids.remove(idx);
+        } else {
+            ids.push(id);
+        }
+        // let selected = links.iter().last().cloned();
+        link_ids.set(ids);
     };
     let ondelete = move |_| {
-        if selected_link_ids.is_empty() {
+        to_owned![links, user, action, link_ids];
+        let ids: Vec<i64> = link_ids.get().clone().into_iter().collect();
+        if ids.is_empty() {
             return;
         }
-        to_owned![links, user, selected_link_ids, action];
         cx.spawn(async move {
-            let ids: Vec<i64> = selected_link_ids.into_iter().collect();
             let _ = db().delete_links(ids).await;
             let new_links = db().links_by_user_id(user.id).await;
             links.set(new_links);
             action.set(ProfileAction::None);
         });
     };
+    let link_id = link_ids.get().iter().last();
+    let link = if let Some(id) = link_id {
+        links.iter().find(|l| l.id == *id)
+    } else {
+        None
+    };
     cx.render(rsx! {
-        Nav { }
         div {
             class: "flex flex-col max-w-3xl mx-auto gap-8 items-center h-full relative w-full mt-8 relative",
             {
@@ -793,7 +814,8 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
             Bio {}
             LinkList {
                 links: links.to_vec(),
-                show_select_buttons: true
+                onselect: onselect,
+                show_select: true
             }
             if **action != ProfileAction::None {
                 rsx! {
@@ -805,11 +827,12 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                                 link: None
                             } },
                             ProfileAction::Delete => rsx! { DeleteLink {
+                                num_links: link_ids.len(),
                                 ondelete: ondelete
                             } },
                             ProfileAction::Edit => rsx! { AddEditLink {
                                 onsave: onsave,
-                                link: link,
+                                link: link.cloned(),
                             } },
                             ProfileAction::None => rsx! { () },
                         }
@@ -861,8 +884,9 @@ async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) ->
     let maybe_user: Option<User> = db().user_by_login_code(login_user.login_code).await.ok();
     let session = depot.session_mut().unwrap();
     if let Some(u) = maybe_user {
-        session.insert("user_id", u.id).unwrap();
-        res.render(Redirect::other(PROFILE));
+        let _ = session.insert("user_id", u.id)?;
+        let url = format!("/@{}", u.username);
+        res.render(Redirect::other(url));
     } else {
         // TODO exponential backoff
         let BodyProps {
@@ -872,6 +896,7 @@ async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) ->
         } = BodyProps::from_depot(depot).await;
         res.render(Text::Html(render_lazy(rsx! {
             Layout {
+                Nav {}
                 Body {
                     csrf_token: csrf_token,
                     current_user: current_user,
@@ -893,6 +918,22 @@ fn logout(depot: &mut Depot, res: &mut Response) {
 }
 
 #[derive(Props)]
+struct TextInputProps<'a> {
+    #[props(optional)]
+    name: Option<&'a str>,
+    #[props(optional)]
+    autofocus: Option<bool>,
+    #[props(optional)]
+    placeholder: Option<&'a str>,
+    #[props(optional)]
+    value: Option<&'a str>,
+    #[props(optional)]
+    oninput: Option<EventHandler<'a, FormEvent>>,
+    #[props(optional)]
+    onenter: Option<EventHandler<'a, KeyboardEvent>>,
+}
+
+#[derive(Props)]
 struct ChildrenProps<'a> {
     children: Element<'a>,
 }
@@ -908,8 +949,11 @@ fn Cta<'a>(cx: Scope<'a, ChildrenProps<'a>>) -> Element {
     )
 }
 
-#[inline_props]
-fn Submit<'a>(cx: Scope, value: &'a str) -> Element<'a> {
+fn Submit<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element<'a> {
+    let value = match &cx.props.value {
+        Some(v) => v,
+        None => "",
+    };
     cx.render(rsx! {
         input {
             r#type: "submit",
@@ -1366,39 +1410,27 @@ fn DeleteLinkButton<'a>(cx: Scope<'a, DeleteLinkButtonProps<'a>>) -> Element<'a>
     })
 }
 
-#[derive(Props)]
-struct MultilineTextInput<'a> {
-    #[props(optional)]
-    placeholder: Option<&'a str>,
-    #[props(optional)]
-    autofocus: Option<bool>,
-    value: String,
-    #[props(optional)]
-    onenter: Option<EventHandler<'a, KeyboardEvent>>,
-    #[props(optional)]
-    oninput: Option<EventHandler<'a, FormEvent>>,
-}
-
-fn MultilineTextInput<'a>(cx: Scope<'a, MultilineTextInput<'a>>) -> Element {
-    let placeholder = match cx.props.placeholder {
-        Some(p) => p,
-        None => "",
-    };
-    let autofocus = match cx.props.autofocus {
-        Some(af) => af,
-        None => false,
-    };
-    let value = &cx.props.value;
+fn MultilineTextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
+    let TextInputProps {
+        placeholder,
+        autofocus,
+        value,
+        oninput,
+        ..
+    } = cx.props;
+    let placeholder = placeholder.unwrap_or("");
+    let autofocus = autofocus.unwrap_or(false);
+    let value = value.unwrap_or("");
     let oninput = move |event: FormEvent| {
-        if let Some(oninput) = &cx.props.oninput {
-            oninput.call(event);
+        if let Some(handler) = oninput {
+            handler.call(event);
         }
     };
     let onkeypress = move |event: KeyboardEvent| {
         match event.key() {
             Key::Enter => {
-                if let Some(onenter) = &cx.props.onenter {
-                    onenter.call(event);
+                if let Some(handler) = &cx.props.onenter {
+                    handler.call(event);
                 }
             }
             _ => (),
@@ -1417,106 +1449,34 @@ fn MultilineTextInput<'a>(cx: Scope<'a, MultilineTextInput<'a>>) -> Element {
     })
 }
 
-#[derive(Props)]
-struct TextInputProps<'a> {
-    #[props(optional)]
-    name: Option<&'a str>,
-    #[props(optional)]
-    value: Option<&'a str>,
-    #[props(optional)]
-    oninput: Option<EventHandler<'a, FormEvent>>,
-}
-
 fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
-    let value = match &cx.props.value {
-        Some(v) => v,
-        None => "",
+    let TextInputProps {
+        name,
+        value,
+        oninput,
+        autofocus,
+        ..
+    } = cx.props;
+    let autofocus = autofocus.unwrap_or(false);
+    let value = value.unwrap_or("");
+    let on_input = move |event| {
+        if let Some(handler) = oninput {
+            handler.call(event);
+        }
     };
+    let name = name.unwrap_or("");
     cx.render(
         rsx! {
             input {
                 r#type: "text",
-                name: "{cx.props.name:?}",
+                name: name,
                 value: value,
+                autofocus: autofocus,
                 class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
-                oninput: move |event| {
-                    if let Some(oninput) = &cx.props.oninput {
-                        oninput.call(event);
-                    }
-                }
+                oninput: on_input,
             }
         }
     )
-}
-
-#[derive(Props)]
-struct TextFieldProps<'a> {
-    name: &'a str,
-    lbl: Option<&'a str>,
-    autofocus: Option<bool>,
-    value: Option<&'a str>,
-    onblur: Option<EventHandler<'a, Event<FocusData>>>,
-    onkeypress: Option<EventHandler<'a, KeyboardEvent>>,
-    oninput: Option<EventHandler<'a, Event<FormData>>>,
-    onenter: Option<EventHandler<'a, Event<FormData>>>,
-    placeholder: Option<&'a str>,
-}
-
-fn TextField<'a>(cx: Scope<'a, TextFieldProps<'a>>) -> Element<'a> {
-    let TextFieldProps {
-        autofocus,
-        placeholder,
-        value,
-        lbl,
-        onblur,
-        onkeypress,
-        oninput,
-        onenter,
-        name,
-    } = cx.props;
-    let autofocus_attr = if let Some(_) = *autofocus {
-        "autofocus"
-    } else {
-        ""
-    };
-    let place_holder = if let Some(p) = *placeholder { p } else { "" };
-    let val = if let Some(val) = value { val } else { "" };
-    let label_ = if let Some(label_) = lbl { label_ } else { "" };
-    return cx.render(rsx! (
-        label {
-            class: "flex flex-col gap-2",
-            "{label_}"
-            input {
-                r#type: "text",
-                name: "{name}",
-                autofocus: "{autofocus_attr}",
-                placeholder: "{place_holder}",
-                class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
-                value: "{val}",
-                onsubmit: |event| {
-                    if let Some(oe) = onenter.as_ref() {
-                        oe.call(event);
-                    }
-                },
-                onkeypress: |event| {
-                    if let Some(kp) = onkeypress.as_ref() {
-                        kp.call(event);
-                    }
-                },
-                oninput: |event| {
-                    if let Some(inp) = oninput.as_ref() {
-
-                        inp.call(event);
-                    }
-                },
-                onblur: |event| {
-                    if let Some(ev) = onblur.as_ref() {
-                        ev.call(event)
-                    }
-                }
-            }
-        }
-    ));
 }
 
 fn app(cx: Scope<AppProps>) -> Element {
@@ -1529,6 +1489,7 @@ fn app(cx: Scope<AppProps>) -> Element {
     let set_user = use_set(cx, USER);
     set_user(current_user.clone());
     return cx.render(rsx! {
+        Nav {}
         Body {
             csrf_token: csrf_token,
             current_user: Some(current_user),
@@ -1598,7 +1559,8 @@ async fn public_profile(
                         "{bio}"
                     }
                     LinkList {
-                        links: links
+                        links: links,
+                        show_select: false
                     }
                     if props.current_user.is_some() {
                         rsx! {
@@ -1652,7 +1614,7 @@ async fn connect(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), StatusError> {
-    let addr = format!("http://{}", env::var("SERVER_ADDR").unwrap());
+    let addr = format!("http://{}", env::var("WS_ADDR").unwrap());
     let origin = match req.header::<String>(ORIGIN) {
         Some(o) => o,
         None => String::default(),
@@ -1699,7 +1661,8 @@ async fn main() -> Result<()> {
     let database_url = env::var("DATABASE_URL")?;
     database::init(database_url).await;
     database::migrate().await?;
-    let addr: SocketAddr = ([127, 0, 0, 1], 9001).into();
+    let addr_string = env::var("SERVER_ADDR")?;
+    let addr: SocketAddr = addr_string.parse().unwrap();
     let router = routes();
 
     println!("Listening on {}", addr);
