@@ -1647,9 +1647,12 @@ async fn connect(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
-        .init();
+    let log_level = env::var("LOG_LEVEL")?;
+    if log_level.to_lowercase() == "debug" {
+        tracing_subscriber::fmt()
+            .with_max_level(Level::DEBUG)
+            .init();
+    }
 
     let database_url = env::var("DATABASE_URL")?;
     database::init(database_url).await;
