@@ -1,0 +1,49 @@
+# fly.toml file generated for dawn-wave-7794 on 2023-03-16T21:34:32-06:00
+
+app = "dawn-wave-7794"
+kill_signal = "SIGINT"
+kill_timeout = 5
+primary_region = "den"
+processes = []
+
+[env]
+  WS_ADDR = "wss://dawn-wave-7794.fly.dev/ws"
+  ORIGIN = "https://dawn-wave-7794.fly.dev"
+  SERVER_ADDR = "0.0.0.0:8080"
+  # SESSION_KEY = <secret>
+  # CSRF_KEY = <secret>
+  DATABASE_URL = "sqlite:///mnt/db/allyourlinks.sqlite3"
+
+[experimental]
+  cmd = "./allyourlinks"
+  auto_rollback = true
+
+[[services]]
+  http_checks = []
+  internal_port = 8080
+  processes = ["app"]
+  protocol = "tcp"
+  script_checks = []
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
+
+  [[services.ports]]
+    force_https = true
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.tcp_checks]]
+    grace_period = "1s"
+    interval = "15s"
+    restart_limit = 0
+    timeout = "2s"
+
+[mounts]
+  source = "db"
+  destination = "/mnt/db"
