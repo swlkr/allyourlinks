@@ -6,6 +6,7 @@ There may or may not be a [live preview here](https://dawn-wave-7794.fly.dev/) d
 
 ### stack
 
+- tailwindcss
 - dioxus liveview
 - salvo
 - rust
