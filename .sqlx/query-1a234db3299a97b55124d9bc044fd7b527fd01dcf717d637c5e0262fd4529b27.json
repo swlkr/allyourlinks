@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "update users set bio = ?, updated_at = unixepoch() where id = ? returning id as 'id!', bio, photo, username as 'username!', login_code as 'login_code!', updated_at, created_at as 'created_at!'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "bio",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "photo",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "username!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "login_code!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 6,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1a234db3299a97b55124d9bc044fd7b527fd01dcf717d637c5e0262fd4529b27"
+}

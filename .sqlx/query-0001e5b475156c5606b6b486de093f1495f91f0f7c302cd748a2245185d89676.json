@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "select id, username, login_code, updated_at, created_at, bio, photo from users where id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "username",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "login_code",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "bio",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "photo",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0001e5b475156c5606b6b486de093f1495f91f0f7c302cd748a2245185d89676"
+}
