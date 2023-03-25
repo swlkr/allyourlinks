@@ -775,6 +775,7 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
         cx.spawn(async move {
             let _ = db().delete_links(ids).await;
             let new_links = db().links_by_user_id(user.id).await;
+            link_ids.set(vec![]);
             links.set(new_links);
             action.set(ProfileAction::None);
         });
