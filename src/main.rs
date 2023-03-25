@@ -1648,7 +1648,10 @@ async fn connect(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let log_level = env::var("LOG_LEVEL")?;
+    let log_level = match env::var("LOG_LEVEL") {
+        Ok(lev) => lev,
+        Err(_) => String::with_capacity(0),
+    };
     if log_level.to_lowercase() == "debug" {
         tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
