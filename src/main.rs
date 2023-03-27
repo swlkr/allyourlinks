@@ -4,12 +4,10 @@ mod database;
 
 use anyhow::Result;
 use dioxus::prelude::*;
-use dioxus_elements::input_data::keyboard_types::Key;
 use dioxus_free_icons::icons::bs_icons::*;
 use dioxus_free_icons::Icon;
 use dioxus_liveview::LiveViewPool;
 use dioxus_ssr::render_lazy;
-use fermi::{use_init_atom_root, use_read, use_set, Atom};
 use rust_embed::RustEmbed;
 use salvo::affix;
 use salvo::csrf::{aes_gcm_session_csrf, CsrfDepotExt, FormFinder};
@@ -35,8 +33,6 @@ pub const LOGIN: &str = "/login";
 pub const LOGOUT: &str = "/logout";
 pub const PROFILE: &str = "/profile";
 pub const PUBLIC_PROFILE: &str = "/@<username>";
-
-static USER: Atom<User> = |_| User::default();
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -104,14 +100,14 @@ fn routes() -> Router {
                         .get(home)
                         .post(signup)
                         .push(at(LOGIN).get(get_login).post(post_login))
-                        .push(at(PUBLIC_PROFILE).get(public_profile))
+                        .push(at(PUBLIC_PROFILE).get(profile))
                         .push(at(LOGOUT).post(logout)),
                 )
                 .push(
                     Router::new()
                         .hoop(auth)
                         .hoop(affix::inject(arc_view))
-                        .push(at(PROFILE).get(profile))
+                        .push(at(PROFILE).get(edit_profile))
                         .push(at("/ws").get(connect)),
                 ),
         )
@@ -208,7 +204,6 @@ struct AppState {
 }
 
 fn Layout<'a>(cx: Scope<'a, ChildrenProps<'a>>) -> Element<'a> {
-    use_init_atom_root(cx);
     cx.render(rsx! {
         "<!DOCTYPE html>"
         "<html lang=en>"
@@ -494,6 +489,38 @@ fn LinkIconComponent<'a>(cx: Scope<'a, LinkIconComponentProps<'a>>) -> Element<'
 }
 
 #[derive(Props)]
+struct EditBioProps<'a> {
+    bio: String,
+    onsave: EventHandler<'a, String>,
+}
+
+fn EditBio<'a>(cx: Scope<'a, EditBioProps<'a>>) -> Element<'a> {
+    let EditBioProps { onsave, bio } = cx.props;
+    let onsubmit = move |event: FormEvent| {
+        if let Some(bio) = event.values.get("bio") {
+            onsave.call(bio.clone());
+        }
+    };
+    cx.render(rsx! {
+        div {
+            class: "pt-8",
+            form {
+                class: "flex flex-col gap-4",
+                onsubmit: onsubmit,
+                MultilineTextInput {
+                    value: "{bio}",
+                    name: "bio",
+                    placeholder: "Add your bio here"
+                }
+                SheetSubmit {
+                    value: "Save bio"
+                }
+            }
+        }
+    })
+}
+
+#[derive(Props)]
 struct DeleteLinkProps<'a> {
     num_links: usize,
     ondelete: EventHandler<'a>,
@@ -620,37 +647,22 @@ fn LinkList<'a>(cx: Scope<'a, LinkListProps<'a>>) -> Element<'a> {
     })
 }
 
-fn Bio(cx: Scope) -> Element {
-    let user: &User = use_read(cx, USER);
-    let set_user = use_set(cx, USER);
-    let onenter = move |_| {
-        to_owned![set_user, user];
-        cx.spawn(async move {
-            match db().update_user_bio(user.id, user.bio).await {
-                Ok(user) => {
-                    set_user(user);
-                }
-                _ => (),
-            }
-        });
-    };
-    let oninput = move |event: FormEvent| {
-        to_owned![user];
-        user.bio = Some(event.value.clone());
-        set_user(user);
-    };
-    let bio = match &user.bio {
-        Some(b) => b,
-        None => "Add your bio here",
-    };
+#[derive(Props)]
+struct BioProps<'a> {
+    bio: String,
+    onselect: EventHandler<'a>,
+}
+
+fn Bio<'a>(cx: Scope<'a, BioProps<'a>>) -> Element {
+    let BioProps { bio, onselect } = &cx.props;
     cx.render(rsx! {
         div {
-            class: "w-full px-4",
-            MultilineTextInput {
-                value: bio,
-                autofocus: true,
-                oninput: oninput,
-                onenter: onenter,
+            class: "flex gap-4",
+            SelectButton {
+                onclick: move |_| onselect.call(())
+            }
+            div {
+                "{bio}"
             }
         }
     })
@@ -661,39 +673,54 @@ struct AddEditLinkProps<'a> {
     onsave: EventHandler<'a, (Option<i64>, String, Option<String>)>,
     #[props(!optional)]
     link: Option<Link>,
+    username: &'a String,
 }
 
 fn AddEditLink<'a>(cx: Scope<'a, AddEditLinkProps<'a>>) -> Element {
-    let (id, url, name) = match &cx.props.link {
+    let AddEditLinkProps {
+        onsave,
+        link,
+        username,
+    } = &cx.props;
+    let (id, url, name) = match link {
         Some(link) => (Some(link.id), link.url.clone(), link.name.clone()),
         None => (None, String::default(), None),
     };
     let url = use_state(cx, || url);
-    let name = use_state(cx, || name);
-    let user = use_read(cx, USER);
     let on_icon_click = move |icon| {
-        to_owned![url, user];
+        to_owned![url];
         let u = Link::url_from_icon(icon);
-        let new_url = format!("{}{}", u, user.username);
+        let new_url = format!("{}{}", u, username);
         url.set(new_url);
     };
+    let onsubmit = move |event: FormEvent| {
+        let values = &event.values;
+        let url = values
+            .get("url")
+            .cloned()
+            .unwrap_or(String::with_capacity(0));
+        let name = values.get("name").cloned();
+        onsave.call((id, url, name));
+    };
+    let name = name.unwrap_or(String::default());
     cx.render(rsx! {
         div {
+            class: "flex flex-col gap-8",
             div {
-                class: "flex flex-col gap-8",
-                div {
-                    class: "flex flex-col gap-2",
-                    div { class: "font-bold", "select a link" }
-                    IconList {
-                        onclick: on_icon_click
-                    }
+                class: "flex flex-col gap-2",
+                div { class: "font-bold", "select a link" }
+                IconList {
+                    onclick: on_icon_click
                 }
+            }
+            form {
+                onsubmit: onsubmit,
+                class: "flex flex-col gap-8",
                 div {
                     class: "flex flex-col gap-2",
                     label { r#for: "url", class: "font-bold", "change the url" }
                     TextInput {
-                        value: url.get(),
-                        oninput: move |event: FormEvent| url.set(event.value.clone()),
+                        value: "{url}",
                         name: "url"
                     }
                 }
@@ -702,13 +729,13 @@ fn AddEditLink<'a>(cx: Scope<'a, AddEditLinkProps<'a>>) -> Element {
                     label { r#for: "name", class: "font-bold", "add a name instead of url" }
                     TextInput {
                         name: "name",
-                        value: name.get().as_ref().map_or("", String::as_str),
-                        oninput: move |event: FormEvent| name.set(Some(event.value.clone())),
+                        value: "{name}",
                     }
                 }
-                RoundedRect {
-                    onclick: move |_| cx.props.onsave.call((id, url.get().clone(), name.get().clone())),
-                    "Save link"
+                input {
+                    r#type: "submit",
+                    class: "dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 rounded-md px-6 py-3 drop-shadow uppercase font-bold text-xl w-full",
+                    value: "Save link"
                 }
             }
         }
@@ -720,6 +747,7 @@ enum ProfileAction {
     Add,
     Delete,
     Edit,
+    EditBio,
     None,
 }
 
@@ -729,16 +757,26 @@ struct ProfileProps<'a> {
     links: Vec<Link>,
 }
 
-fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
-    let user = cx.props.user;
-    let links = use_state(cx, || cx.props.links.clone());
+fn EditProfile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
+    let ProfileProps { user, links } = cx.props;
+    let links = use_state(cx, || links.clone());
     let action = use_state(cx, || ProfileAction::None);
     let link_ids: &UseState<Vec<i64>> = use_state(cx, || Vec::new());
     let User {
-        photo, username, ..
+        id: user_id,
+        photo,
+        username,
+        bio,
+        ..
     } = user;
+    let bio_state = use_state(cx, || bio.clone());
+    let bio_selected = use_state(cx, || false);
+    let bio = match bio_state.get() {
+        Some(b) => b.clone(),
+        None => String::default(),
+    };
     let onsave = move |(id, url, name): (Option<i64>, String, Option<String>)| {
-        to_owned![user, links, action];
+        to_owned![user_id, links, action];
         if url.is_empty() {
             todo!("Show an error or something that url needs to be filled in");
             // action.set(ProfileAction::None);
@@ -747,9 +785,9 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                 if let Some(id) = id {
                     let _ = db().update_link(id, url, name).await;
                 } else {
-                    let _ = db().insert_link(user.id, url, name).await;
+                    let _ = db().insert_link(user_id, url, name).await;
                 }
-                let new_links = db().links_by_user_id(user.id).await;
+                let new_links = db().links_by_user_id(user_id).await;
                 links.set(new_links);
                 action.set(ProfileAction::None);
             });
@@ -763,18 +801,17 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
         } else {
             ids.push(id);
         }
-        // let selected = links.iter().last().cloned();
         link_ids.set(ids);
     };
     let ondelete = move |_| {
-        to_owned![links, user, action, link_ids];
+        to_owned![links, user_id, action, link_ids];
         let ids: Vec<i64> = link_ids.get().clone().into_iter().collect();
         if ids.is_empty() {
             return;
         }
         cx.spawn(async move {
             let _ = db().delete_links(ids).await;
-            let new_links = db().links_by_user_id(user.id).await;
+            let new_links = db().links_by_user_id(user_id).await;
             link_ids.set(vec![]);
             links.set(new_links);
             action.set(ProfileAction::None);
@@ -785,6 +822,22 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
         links.iter().find(|l| l.id == *id)
     } else {
         None
+    };
+    let onselectbio = move |_| {
+        to_owned![bio_selected];
+        bio_selected.set(!bio_selected.get());
+    };
+    let onsavebio = move |bio: String| {
+        to_owned![user_id, bio_state, action];
+        cx.spawn(async move {
+            match db().update_user_bio(user_id, Some(bio)).await {
+                Ok(user) => {
+                    action.set(ProfileAction::None);
+                    bio_state.set(user.bio);
+                }
+                _ => (),
+            }
+        });
     };
     cx.render(rsx! {
         div {
@@ -805,7 +858,10 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                 class: "font-bold text-xl",
                 "Editing @{username}"
             }
-            Bio {}
+            Bio {
+                bio: bio,
+                onselect: onselectbio
+            }
             LinkList {
                 links: links.to_vec(),
                 onselect: onselect,
@@ -817,6 +873,7 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                         onclose: move |_| action.set(ProfileAction::None),
                         match **action {
                             ProfileAction::Add => rsx! { AddEditLink {
+                                username: username,
                                 onsave: onsave,
                                 link: None
                             } },
@@ -825,8 +882,13 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                                 ondelete: ondelete
                             } },
                             ProfileAction::Edit => rsx! { AddEditLink {
+                                username: username,
                                 onsave: onsave,
                                 link: link.cloned(),
+                            } },
+                            ProfileAction::EditBio => rsx! { EditBio {
+                                bio: bio_state.get().as_ref().cloned().unwrap_or_default(),
+                                onsave: onsavebio,
                             } },
                             ProfileAction::None => rsx! { () },
                         }
@@ -836,6 +898,7 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
             div {
                 class: "flex flex-col gap-4 fixed md:absolute lg:absolute right-4 md:right-0 lg:right-0 bottom-20 md:bottom-0 lg:bottom-0",
                 DeleteLinkButton {
+                    disabled: **bio_selected,
                     onclick: move |_| {
                         if *action.get() == ProfileAction::Delete {
                             action.set(ProfileAction::None);
@@ -846,7 +909,9 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                 }
                 EditLinkButton {
                     onclick: move |_| {
-                        if *action.get() == ProfileAction::Edit {
+                        if *bio_selected.get() {
+                            action.set(ProfileAction::EditBio);
+                        } else if *action.get() == ProfileAction::Edit {
                             action.set(ProfileAction::None);
                         } else {
                             action.set(ProfileAction::Edit);
@@ -854,6 +919,7 @@ fn Profile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element {
                     },
                 }
                 AddLinkButton {
+                    disabled: **bio_selected,
                     onclick: move |_| {
                         if *action.get() == ProfileAction::Add {
                             action.set(ProfileAction::None);
@@ -921,10 +987,6 @@ struct TextInputProps<'a> {
     placeholder: Option<&'a str>,
     #[props(optional)]
     value: Option<&'a str>,
-    #[props(optional)]
-    oninput: Option<EventHandler<'a, FormEvent>>,
-    #[props(optional)]
-    onenter: Option<EventHandler<'a, KeyboardEvent>>,
 }
 
 #[derive(Props)]
@@ -953,6 +1015,18 @@ fn Submit<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element<'a> {
             r#type: "submit",
             value: "{value}",
             class: "cursor-pointer"
+        }
+    })
+}
+
+fn SheetSubmit<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
+    let TextInputProps { value, .. } = &cx.props;
+    let value = value.unwrap_or_default();
+    cx.render(rsx! {
+        input {
+            r#type: "submit",
+            value: "{value}",
+            class: "dark:bg-yellow-400 dark:text-zinc-900 bg-zinc-900 text-yellow-400 rounded-md px-6 py-3 drop-shadow uppercase font-bold text-xl w-full cursor-pointer",
         }
     })
 }
@@ -1409,36 +1483,21 @@ fn MultilineTextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
         placeholder,
         autofocus,
         value,
-        oninput,
+        name,
         ..
     } = cx.props;
     let placeholder = placeholder.unwrap_or("");
     let autofocus = autofocus.unwrap_or(false);
     let value = value.unwrap_or("");
-    let oninput = move |event: FormEvent| {
-        if let Some(handler) = oninput {
-            handler.call(event);
-        }
-    };
-    let onkeypress = move |event: KeyboardEvent| {
-        match event.key() {
-            Key::Enter => {
-                if let Some(handler) = &cx.props.onenter {
-                    handler.call(event);
-                }
-            }
-            _ => (),
-        };
-    };
+    let name = name.unwrap_or("");
     cx.render(rsx! {
         textarea {
             placeholder: placeholder,
+            name: name,
             class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
             value: "{value}",
             rows: 3,
             autofocus: autofocus,
-            oninput: oninput,
-            onkeypress: onkeypress,
         }
     })
 }
@@ -1447,47 +1506,35 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
     let TextInputProps {
         name,
         value,
-        oninput,
         autofocus,
         ..
     } = cx.props;
     let autofocus = autofocus.unwrap_or(false);
     let value = value.unwrap_or("");
-    let on_input = move |event| {
-        if let Some(handler) = oninput {
-            handler.call(event);
-        }
-    };
     let name = name.unwrap_or("");
-    cx.render(
-        rsx! {
-            input {
-                r#type: "text",
-                name: name,
-                value: value,
-                autofocus: autofocus,
-                class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
-                oninput: on_input,
-            }
+    cx.render(rsx! {
+        input {
+            r#type: "text",
+            name: name,
+            value: value,
+            autofocus: autofocus,
+            class: "bg-yellow-100 text-black dark:bg-zinc-700 dark:text-white outline-none p-3 text-xl rounded-md w-full",
         }
-    )
+    })
 }
 
 fn app(cx: Scope<AppProps>) -> Element {
-    use_init_atom_root(cx);
     let AppProps {
         current_user,
         links,
         csrf_token,
     } = cx.props;
-    let set_user = use_set(cx, USER);
-    set_user(current_user.clone());
     return cx.render(rsx! {
         Nav {}
         Body {
             csrf_token: csrf_token,
             current_user: Some(current_user),
-            Profile {
+            EditProfile {
                 user: current_user,
                 links: links.to_owned()
             }
@@ -1501,7 +1548,7 @@ struct ProfileParams {
 }
 
 #[handler]
-async fn public_profile(
+async fn profile(
     req: &mut Request,
     depot: &mut Depot,
     res: &mut Response,
@@ -1582,7 +1629,7 @@ async fn public_profile(
 }
 
 #[handler]
-async fn profile(res: &mut Response, depot: &mut Depot) -> Result<(), StatusError> {
+async fn edit_profile(res: &mut Response, depot: &mut Depot) -> Result<(), StatusError> {
     let BodyProps {
         current_user,
         csrf_token,
