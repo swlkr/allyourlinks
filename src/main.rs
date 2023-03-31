@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 mod database;
+mod events;
 
 use anyhow::Result;
 use dioxus::prelude::*;
@@ -27,6 +28,7 @@ use tokio::time::sleep;
 use tracing::{debug, Level};
 
 use crate::database::{db, Link, User};
+use crate::events::*;
 
 pub const HOME: &str = "/";
 pub const LOGIN: &str = "/login";
