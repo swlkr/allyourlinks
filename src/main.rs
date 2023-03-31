@@ -33,8 +33,8 @@ use crate::events::*;
 pub const HOME: &str = "/";
 pub const LOGIN: &str = "/login";
 pub const LOGOUT: &str = "/logout";
-pub const PROFILE: &str = "/profile";
-pub const PUBLIC_PROFILE: &str = "/@<username>";
+pub const EDIT_PROFILE: &str = "/profile";
+pub const PROFILE: &str = "/@<username>";
 
 #[derive(RustEmbed)]
 #[folder = "static"]
@@ -102,14 +102,14 @@ fn routes() -> Router {
                         .get(home)
                         .post(signup)
                         .push(at(LOGIN).get(get_login).post(post_login))
-                        .push(at(PUBLIC_PROFILE).get(profile))
+                        .push(at(PROFILE).get(profile))
                         .push(at(LOGOUT).post(logout)),
                 )
                 .push(
                     Router::new()
                         .hoop(auth)
                         .hoop(affix::inject(arc_view))
-                        .push(at(PROFILE).get(edit_profile))
+                        .push(at(EDIT_PROFILE).get(edit_profile))
                         .push(at("/ws").get(connect)),
                 ),
         )
@@ -607,7 +607,7 @@ fn ShowLink<'a>(cx: Scope<'a, ShowLinkProps<'a>>) -> Element {
                 link: link
             }
             a {
-                class: "grow",
+                class: "grow text-left",
                 "{display}"
             }
         }
@@ -749,21 +749,6 @@ fn AddEditLink<'a>(cx: Scope<'a, AddEditLinkProps<'a>>) -> Element {
     })
 }
 
-#[derive(PartialEq)]
-enum ProfileAction {
-    Add,
-    Delete,
-    Edit,
-    EditBio,
-    None,
-}
-
-#[derive(Props, PartialEq)]
-struct ProfileProps<'a> {
-    user: &'a User,
-    links: Vec<Link>,
-}
-
 fn EditProfile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
     let ProfileProps { user, links } = cx.props;
     let links = use_state(cx, || links.clone());
@@ -830,22 +815,6 @@ fn EditProfile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
     } else {
         None
     };
-    let onselectbio = move |_| {
-        to_owned![bio_selected];
-        bio_selected.set(!bio_selected.get());
-    };
-    let onsavebio = move |bio: String| {
-        to_owned![user_id, bio_state, action];
-        cx.spawn(async move {
-            match db().update_user_bio(user_id, Some(bio)).await {
-                Ok(user) => {
-                    action.set(ProfileAction::None);
-                    bio_state.set(user.bio);
-                }
-                _ => (),
-            }
-        });
-    };
     cx.render(rsx! {
         div {
             class: "flex flex-col max-w-3xl mx-auto gap-8 items-center h-full relative w-full mt-8 relative",
@@ -867,7 +836,7 @@ fn EditProfile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
             }
             Bio {
                 bio: bio,
-                onselect: onselectbio
+                onselect: move |_| on_select_bio(bio_selected)
             }
             LinkList {
                 links: links.to_vec(),
@@ -895,7 +864,7 @@ fn EditProfile<'a>(cx: Scope<'a, ProfileProps<'a>>) -> Element<'a> {
                             } },
                             ProfileAction::EditBio => rsx! { EditBio {
                                 bio: bio_state.get().as_ref().cloned().unwrap_or_default(),
-                                onsave: onsavebio,
+                                onsave: move |bio| on_save_bio(cx, bio, user_id, bio_state, action),
                             } },
                             ProfileAction::None => rsx! { () },
                         }
@@ -963,10 +932,10 @@ async fn post_login(req: &mut Request, depot: &mut Depot, res: &mut Response) ->
         } = BodyProps::from_depot(depot).await;
         res.render(Text::Html(render_lazy(rsx! {
             Layout {
-                Nav {}
                 Body {
                     csrf_token: csrf_token,
                     current_user: current_user,
+                    Nav {}
                     Login {
                         message: "Invalid login code"
                     }
@@ -1571,6 +1540,7 @@ async fn profile(
         username,
         bio,
         id,
+        login_code,
         ..
     } = user;
     let links = db().links_by_user_id(id).await;
@@ -1579,14 +1549,26 @@ async fn profile(
         Some(b) => b,
         None => String::with_capacity(0),
     };
+    let is_current_user = match props.current_user {
+        Some(cu) => cu.id == id,
+        _ => false,
+    };
     res.render(Text::Html(render_lazy(rsx! (
         Layout {
             Body {
                 csrf_token: props.csrf_token,
                 current_user: props.current_user,
-                Nav {}
                 div {
-                    class: "flex flex-col max-w-3xl px-4 lg:px-0 mx-auto gap-8 text-center items-center h-full relative w-full",
+                    class: "flex flex-col max-w-3xl px-4 lg:px-0 mx-auto gap-8 text-center items-center h-full relative w-full pt-8",
+                    if is_current_user {
+                        rsx! {
+                            div {
+                                class: "p-4 rounded-md dark:bg-zinc-950 bg-yellow-500 text-left max-w-xs",
+                                p { "This is your login code. It's the only way to log back in and edit your profile so don't forget it!" }
+                                div { class: "pt-2 font-bold", "{login_code}" }
+                            }
+                        }
+                    }
                     {
                         match photo {
                             Some(p) => rsx! {
@@ -1610,14 +1592,14 @@ async fn profile(
                         links: links,
                         show_select: false
                     }
-                    if props.current_user.is_some() {
+                    if is_current_user {
                         rsx! {
                             div {
                                 class: "flex flex-col gap-4 fixed right-4 bottom-20",
                                 div {
                                     class: "flex flex-col gap-2 items-center",
                                     CircleLink {
-                                        href: PROFILE,
+                                        href: EDIT_PROFILE,
                                         div {
                                             class: "bg-zinc-900 dark:bg-yellow-400 flex justify-center items-center -mt-1.5",
                                             Icon { width: 32, height: 32, icon: BsPencil }
