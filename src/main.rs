@@ -657,6 +657,11 @@ struct BioProps<'a> {
 
 fn Bio<'a>(cx: Scope<'a, BioProps<'a>>) -> Element {
     let BioProps { bio, onselect } = &cx.props;
+    let bio = if bio.is_empty() {
+        String::from("<Add your bio here>")
+    } else {
+        bio.to_owned()
+    };
     cx.render(rsx! {
         div {
             class: "flex gap-4",
