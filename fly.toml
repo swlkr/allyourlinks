@@ -45,5 +45,5 @@ processes = []
     timeout = "2s"
 
 [mounts]
-  source = "db_machines"
+  source = "db"
   destination = "/mnt/db"
